@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "crates/loom",
+    "crates/fluxcapacitor",
+    "crates/jni-bridge",
+]
+resolver = "2"
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0"
+authors     = ["FluxCompress Contributors"]
+repository  = "https://github.com/connoradams-mariner/Flux-Compressor"
+
+[workspace.dependencies]
+# Arrow / columnar interop
+arrow       = { version = "52", features = ["prettyprint"] }
+arrow-array = "52"
+arrow-schema = "52"
+arrow-buffer = "52"
+
+# Serialisation
+byteorder   = "1"
+zerocopy    = { version = "0.7", features = ["derive"] }
+
+# Numeric traits (safe u128 handling)
+num-traits  = "0.2"
+
+# Compression fallback
+lz4_flex    = "0.11"
+
+# CLI
+clap        = { version = "4", features = ["derive"] }
+polars      = { version = "0.40", features = ["lazy", "parquet", "ipc"] }
+
+# Error handling
+thiserror   = "1"
+anyhow      = "1"
+
+# Logging
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Testing
+criterion   = { version = "0.5", features = ["html_reports"] }

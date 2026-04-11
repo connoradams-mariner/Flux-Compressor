@@ -1,0 +1,26 @@
+[package]
+name        = "flux-jni-bridge"
+description = "JNI bridge exposing FluxCompress to the Spark/JVM ecosystem"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[lib]
+name       = "flux_jni"
+# cdylib → native shared library (.so / .dylib / .dll) loaded by the JVM.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+loom         = { path = "../loom" }
+jni          = { version = "0.21", features = ["invocation"] }
+arrow        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+byteorder    = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+criterion.workspace = true

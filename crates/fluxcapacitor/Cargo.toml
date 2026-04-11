@@ -1,0 +1,27 @@
+[package]
+name        = "fluxcapacitor"
+description = "FluxCompress CLI – two-pass cold storage optimizer and file manager"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "fluxcapacitor"
+path = "src/main.rs"
+
+[dependencies]
+loom         = { path = "../loom" }
+clap         = { workspace = true }
+polars       = { workspace = true }
+arrow        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+byteorder    = { workspace = true }
+rayon        = "1.10"
+walkdir      = "2"
+indicatif    = "0.17"
