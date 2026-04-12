@@ -71,19 +71,12 @@ for block in info.blocks[:3]:
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Loom Adaptive Classifier                   │
-│  entropy ≈ 0?  →  RLE                                        │
-│  Δ₁ stable?    →  DeltaDelta                                 │
-│  cardinality   →  Dictionary                                 │
-│  numeric range →  BitSlab  + OutlierMap (u128 overflow)      │
-│  fallback      →  SIMD-LZ4                                   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ compressed blocks
-┌──────────────────────────▼──────────────────────────────────┐
-│                    Atlas Footer                              │
-│  BlockMeta × N: [offset][z_min][z_max][null_off][strategy]  │
-│  → Z-Order skipping · Predicate pushdown                     │
-└─────────────────────────────────────────────────────────────┘
-```
+![Architecture Pipeline](architecture-pipeline.png)
+
+### Loom Classifier Waterfall
+
+![Loom Classifier Flowchart](loom-classifier-flowchart.png)
+
+### Flux vs Parquet
+
+![Flux vs Parquet](flux-vs-parquet.png)

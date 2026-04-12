@@ -1,5 +1,7 @@
 # Roadmap: JSON Transaction Log → Binary WAL
 
+![WAL Migration Roadmap](wal-migration-roadmap.png)
+
 ## Current State (v2)
 The transaction log uses JSON files in `_flux_log/NNNNNNNN.json`. This is
 human-readable and easy to debug, but has drawbacks at scale:

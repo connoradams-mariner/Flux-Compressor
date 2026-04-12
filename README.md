@@ -165,6 +165,8 @@ python python/tests/bench_scaling.py
 
 ## Flux vs Parquet: Detailed Comparison
 
+![Flux vs Parquet](docs/flux-vs-parquet.png)
+
 ### Where Flux wins
 
 **Compression ratio — every type.** Flux archive beats Parquet zstd on 9
@@ -306,45 +308,11 @@ Nested             Struct, List, Map                              → Recursive
 
 ## Architecture
 
-```
-Arrow RecordBatch
-      │
-      ▼
-┌─────────────────────────────────────────────────────┐
-│  DType Router (pre-classification fast path)         │
-│       ├─ Boolean         → RLE (skip classifier)    │
-│       ├─ Timestamp       → DeltaDelta (skip)        │
-│       ├─ UInt8/Int8      → BitSlab (skip)           │
-│       ├─ UInt16/Int16    → BitSlab (skip)           │
-│       ├─ Utf8/Binary     → String pipeline          │
-│       │   ├─ Sampled cardinality estimation          │
-│       │   ├─ Low cardinality → Dict + Loom indices   │
-│       │   └─ High cardinality → LZ4/Zstd raw        │
-│       ├─ Struct/List/Map → Parallel leaf flattening  │
-│       │   ├─ Lengths-not-offsets                     │
-│       │   ├─ Delta-from-base values                  │
-│       │   ├─ Constant-length fast path               │
-│       │   └─ Map key sorting                         │
-│       └─ All others      → Loom Classifier           │
-│                                                      │
-│  Loom Classifier Waterfall                           │
-│       1. Entropy ≈ 0?       → RLE                   │
-│       2. Δ₁ constant?       → DeltaDelta            │
-│       3. Cardinality < 5%?  → Dictionary            │
-│       4. Numeric range?     → BitSlab + OutlierMap  │
-│       5. Fallback           → SIMD-LZ4              │
-│                                                      │
-│  Secondary Codec (per compression profile)           │
-│       Speed    → None                                │
-│       Balanced → LZ4                                 │
-│       Archive  → Zstd                                │
-│                                                      │
-│  Atlas Footer                                        │
-│       61-byte BlockMeta per block                    │
-│       ColumnDescriptor schema tree (nested types)    │
-│       Z-Order min/max for predicate pushdown         │
-└─────────────────────────────────────────────────────┘
-```
+![Architecture Pipeline](docs/architecture-pipeline.png)
+
+### Loom Classifier Waterfall
+
+![Loom Classifier Flowchart](docs/loom-classifier-flowchart.png)
 
 ### Crate Layout
 
@@ -388,13 +356,7 @@ chain.
 
 ## Compression Profiles
 
-```
-Profile       Secondary Codec   Best For
-────────────  ────────────────  ───────────────────────────────────────
-Speed         None              Real-time ingest, fastest encode/decode
-Balanced      LZ4 post-pass     General workloads, good ratio + speed
-Archive       Zstd post-pass    Cold storage, maximum compression ratio
-```
+![Compression Profiles](docs/compression-profiles.png)
 
 ```python
 buf = fc.compress(table, profile="archive")

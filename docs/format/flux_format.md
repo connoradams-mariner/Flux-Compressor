@@ -11,23 +11,7 @@ A `.flux` file is a sequence of **compressed data blocks** followed by a
 **seekable Atlas footer**. The footer allows readers to locate and skip
 blocks without reading the full file.
 
-```
-┌──────────────────────────────────────┐
-│  Block 0  (variable length)          │
-├──────────────────────────────────────┤
-│  Block 1                             │
-├──────────────────────────────────────┤
-│  ...                                 │
-├──────────────────────────────────────┤
-│  Block N-1                           │
-├──────────────────────────────────────┤
-│  Atlas Footer                        │
-│  ├─ BlockMeta × N  (50 bytes each)   │
-│  ├─ block_count    (4 bytes, LE u32) │
-│  ├─ footer_length  (4 bytes, LE u32) │
-│  └─ FLUX_MAGIC     (4 bytes = FLUX)  │
-└──────────────────────────────────────┘
-```
+![File Layout](file-layout.png)
 
 The last 4 bytes are always `0x46 0x4C 0x55 0x58` ("FLUX"). A reader locates
 the footer by seeking to `EOF - 4`, reading `footer_length`, then seeking
