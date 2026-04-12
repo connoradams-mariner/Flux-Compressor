@@ -41,7 +41,7 @@
 #![allow(non_snake_case)]
 
 use jni::JNIEnv;
-use jni::objects::{JByteArray, JClass, JLongArray, JObject, JObjectArray};
+use jni::objects::{JByteArray, JByteBuffer, JClass, JLongArray, JObject, JObjectArray};
 use jni::sys::{jbyteArray, jlongArray, jobjectArray, jint};
 
 use loom::{
@@ -61,11 +61,11 @@ pub use u128_bridge::{jlong_pair_to_u128, u128_to_jlong_pair};
 ///
 /// `data` must be a `DirectByteBuffer` holding `valueCount` little-endian u64
 /// values (8 bytes each).  Returns the compressed `.flux` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_fluxcompress_FluxNative_compress(
     mut env: JNIEnv,
     _class: JClass,
-    data: JObject,
+    data: JByteBuffer,
     value_count: jint,
 ) -> jbyteArray {
     let result = compress_direct_buffer(&mut env, &data, value_count as usize);
@@ -88,7 +88,7 @@ pub extern "system" fn Java_io_fluxcompress_FluxNative_compress(
 
 fn compress_direct_buffer(
     env: &mut JNIEnv,
-    buffer: &JObject,
+    buffer: &JByteBuffer,
     value_count: usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Zero-copy: get raw pointer into the JVM's off-heap DirectByteBuffer.
@@ -128,7 +128,7 @@ fn compress_direct_buffer(
 ///
 /// Accepts two parallel `long[]` arrays representing the high and low 64 bits
 /// of each u128 value.  Reconstructs full `u128` in Rust and compresses.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_fluxcompress_FluxNative_compressU128(
     mut env: JNIEnv,
     _class: JClass,
@@ -187,7 +187,7 @@ fn compress_u128_arrays(
 ///
 /// Decompresses a flux block and returns the values as a flat byte array of
 /// little-endian u64 values (8 bytes each).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_fluxcompress_FluxNative_decompress(
     mut env: JNIEnv,
     _class: JClass,
@@ -233,7 +233,7 @@ fn decompress_to_u64_bytes(
 /// Decompresses a flux block containing u128 values and returns them as a
 /// `long[2][]` array where `result[0]` is the high words and `result[1]` is
 /// the low words.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_io_fluxcompress_FluxNative_decompressU128(
     mut env: JNIEnv,
     _class: JClass,

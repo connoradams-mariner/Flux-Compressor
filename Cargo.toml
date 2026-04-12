@@ -9,7 +9,7 @@ resolver = "2"
 
 [workspace.package]
 version     = "0.1.0"
-edition     = "2026"
+edition     = "2024"
 license     = "Apache-2.0"
 authors     = ["Connor Adams"]
 repository  = "https://github.com/connoradams-mariner/Flux-Compressor"
@@ -28,8 +28,19 @@ zerocopy    = { version = "0.7", features = ["derive"] }
 # Numeric traits (safe u128 handling)
 num-traits  = "0.2"
 
-# Compression fallback
+# Compression
 lz4_flex    = "0.11"
+zstd        = "0.13"
+
+# Parallelism
+rayon       = "1.10"
+
+# Integrity
+crc32fast   = "1"
+
+# Serialisation (transaction log)
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
 
 # PyO3 (Python bindings)
 pyo3        = { version = "0.21", features = ["extension-module", "abi3-py38"] }

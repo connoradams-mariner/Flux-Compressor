@@ -206,6 +206,9 @@ fn pass2_repack(scan: &ScanResult) -> Result<Vec<u8>> {
             z_max,
             null_bitmap_offset: 0,
             strategy,
+            value_count: block.len() as u32,
+            column_id: 0,
+            crc32: 0,
         });
 
         pb.inc(1);

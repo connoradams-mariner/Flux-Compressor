@@ -58,7 +58,8 @@ pub fn compress(values: &[u128]) -> FluxResult<Vec<u8>> {
 
     let mut buf = Vec::new();
     buf.write_u8(TAG)?;
-    buf.write_u16::<LittleEndian>(values.len() as u16)?;
+    buf.write_u8(0)?; // secondary_codec: None
+    buf.write_u32::<LittleEndian>(values.len() as u32)?;
     // first_value
     buf.write_u64::<LittleEndian>(values[0] as u64)?;
     buf.write_u64::<LittleEndian>((values[0] >> 64) as u64)?;
@@ -78,7 +79,8 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     }
     let mut cur = Cursor::new(data);
     let _tag = cur.read_u8()?;
-    let value_count = cur.read_u16::<LittleEndian>()? as usize;
+    let _secondary_codec = cur.read_u8()?;
+    let value_count = cur.read_u32::<LittleEndian>()? as usize;
     let fv_lo = cur.read_u64::<LittleEndian>()? as u128;
     let fv_hi = cur.read_u64::<LittleEndian>()? as u128;
     let first_value = fv_lo | (fv_hi << 64);

@@ -16,14 +16,11 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 loom         = { path = "../loom" }
 pyo3         = { version = "0.21", features = ["extension-module", "abi3-py38"] }
-arrow        = { workspace = true }
+arrow        = { workspace = true, features = ["pyarrow"] }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 byteorder    = { workspace = true }
 thiserror    = { workspace = true }
-
-# PyArrow C Data Interface – zero-copy Arrow ↔ Python bridge
-pyo3-arrow  = "0.4"
 
 [features]
 default      = ["simd-avx2"]

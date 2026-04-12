@@ -20,12 +20,18 @@ byteorder.workspace   = true
 zerocopy.workspace    = true
 num-traits.workspace  = true
 lz4_flex.workspace    = true
+zstd.workspace        = true
+crc32fast.workspace   = true
+rayon.workspace       = true
+serde.workspace       = true
+serde_json.workspace  = true
 thiserror.workspace   = true
 anyhow.workspace      = true
 tracing.workspace     = true
 
 [dev-dependencies]
 criterion.workspace   = true
+tempfile              = "3"
 
 [[bench]]
 name    = "bit_slab"
@@ -33,6 +39,7 @@ harness = false
 
 [[example]]
 name = "integration_demo"
+path = "../../examples/integration_demo.rs"
 
 [features]
 default  = ["simd-avx2"]

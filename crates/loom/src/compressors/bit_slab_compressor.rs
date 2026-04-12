@@ -31,15 +31,16 @@ pub const TAG: u8 = 0x04;
 /// Returns the raw block bytes (without the Atlas entry — the caller appends
 /// those to the footer).
 pub fn compress(values: &[u128]) -> FluxResult<Vec<u8>> {
-    assert!(values.len() <= u16::MAX as usize, "block too large");
+    assert!(values.len() <= u32::MAX as usize, "block too large");
 
     let (slab_bytes, outlier_map, slab_width, for_val) = encode_with_outlier_map(values)?;
     let om_bytes = outlier_map.to_bytes()?;
 
     let mut buf = Vec::new();
     buf.write_u8(TAG)?;
+    buf.write_u8(0)?; // secondary_codec: None
     buf.write_u8(slab_width)?;
-    buf.write_u16::<LittleEndian>(values.len() as u16)?;
+    buf.write_u32::<LittleEndian>(values.len() as u32)?;
     // Frame-of-reference as two u64s.
     buf.write_u64::<LittleEndian>(for_val as u64)?;
     buf.write_u64::<LittleEndian>((for_val >> 64) as u64)?;
@@ -60,8 +61,9 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
 
     let mut cur = Cursor::new(data);
     let _tag = cur.read_u8()?;
+    let _secondary_codec = cur.read_u8()?;
     let slab_width = cur.read_u8()?;
-    let value_count = cur.read_u16::<LittleEndian>()? as usize;
+    let value_count = cur.read_u32::<LittleEndian>()? as usize;
     let for_lo = cur.read_u64::<LittleEndian>()? as u128;
     let for_hi = cur.read_u64::<LittleEndian>()? as u128;
     let for_val = for_lo | (for_hi << 64);

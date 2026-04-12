@@ -200,16 +200,22 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
 
 /// Compute normalised bit-entropy of the value distribution.
 ///
-/// Bins values by their top byte to approximate entropy cheaply without
-/// a full histogram over u128 space.
+/// Bins values by their most-significant occupied byte to approximate
+/// entropy cheaply without a full histogram over u128 space.
 fn bit_entropy(values: &[u128]) -> f64 {
     if values.len() < 2 {
         return 0.0;
     }
-    // Use a 256-bucket histogram keyed on the high byte of each value.
+    // Determine the effective bit-width across all values so we bucket
+    // on the top 8 *occupied* bits rather than bits 120-127 (which are
+    // always zero for values that fit in a u64).
+    let max_val = values.iter().copied().max().unwrap_or(0);
+    let msb = if max_val > 0 { 128 - max_val.leading_zeros() } else { 0 };
+    let shift = msb.saturating_sub(8);
+
     let mut counts = [0u32; 256];
     for &v in values {
-        let bucket = (v >> 120) as usize; // top 8 bits
+        let bucket = ((v >> shift) & 0xFF) as usize;
         counts[bucket] += 1;
     }
     let n = values.len() as f64;
@@ -258,7 +264,7 @@ fn is_delta_stable(values: &[u128]) -> bool {
     let range = deltas.iter().max().unwrap() - deltas.iter().min().unwrap();
 
     // "Narrow Gaussian": standard deviation is less than 1 % of the range.
-    range > 0 && std_dev / range.abs() as f64 < 0.01
+    range > 0 && std_dev / (range.abs() as f64) < 0.01
 }
 
 /// Fraction of unique values in the segment.
@@ -303,8 +309,8 @@ mod tests {
 
     #[test]
     fn numeric_range_is_bit_slab() {
-        // Uniform random-looking values in 0..65535 range.
-        let values: Vec<u128> = (0u128..1024).map(|i| (i * 61 + 13) % 65536).collect();
+        // Scattered values in 0..65535 range (wrapping mod creates non-constant deltas).
+        let values: Vec<u128> = (0u128..1024).map(|i| (i * 997) % 65536).collect();
         let r = classify(&values);
         assert_eq!(r.strategy, LoomStrategy::BitSlab);
     }

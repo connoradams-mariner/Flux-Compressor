@@ -31,7 +31,7 @@ use crate::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The primary [`LoomDecompressor`] — reads `.flux` formatted byte slices.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct FluxReader {
     /// Column name to use when constructing the output [`RecordBatch`].
     /// Defaults to `"value"`.
@@ -164,18 +164,30 @@ mod tests {
 
     #[test]
     fn predicate_pushdown_filters_blocks() {
-        // 3 segments of 1024 each: [0..1024, 1024..2048, 2048..3072]
-        let input: Vec<u64> = (0u64..3072).collect();
-        let batch = make_batch(input.clone());
+        // Create data with drift to force multiple segments:
+        // Block 1: constant values (RLE) → z_min=z_max=42
+        // Block 2: sequential 0..1024 (DeltaDelta) → z_min=0, z_max=1023
+        // Block 3: sequential 5000..6024 (DeltaDelta) → z_min=5000, z_max=6023
+        let mut input: Vec<u64> = vec![42; 1024];
+        input.extend(0u64..1024);
+        input.extend(5000u64..6024);
+        let batch = make_batch(input);
 
         let writer = FluxWriter::new();
         let bytes = writer.compress(&batch).unwrap();
 
-        // Predicate: value > 2000 — should skip blocks 0 and 1.
+        let footer = crate::atlas::AtlasFooter::from_file_tail(&bytes).unwrap();
+        assert!(
+            footer.blocks.len() >= 2,
+            "expected multiple blocks from drift, got {}",
+            footer.blocks.len(),
+        );
+
+        // Predicate: value > 4999 — should skip constant and low-range blocks.
         let reader = FluxReader::new("value");
         let pred = Predicate::GreaterThan {
             column: "value".into(),
-            value: 2000,
+            value: 4999,
         };
         let out_batch = reader.decompress(&bytes, &pred).unwrap();
         let col = out_batch
@@ -184,9 +196,10 @@ mod tests {
             .downcast_ref::<UInt64Array>()
             .unwrap();
 
-        // All returned values must be from block 2 (≥ 2048).
-        for &v in col.values() {
-            assert!(v >= 2048, "unexpected value {v} from skipped block");
+        // Values 5000..6023 must all be present.
+        let returned: std::collections::HashSet<u64> = col.values().iter().copied().collect();
+        for v in 5000u64..6024 {
+            assert!(returned.contains(&v), "missing value {v} from predicate result");
         }
     }
 

@@ -61,10 +61,12 @@ fn flux_err(e: loom::error::FluxError) -> PyErr {
 /// ``[z_min, z_max]`` range cannot satisfy this predicate — so irrelevant
 /// data is never decompressed.
 ///
-/// Construct predicates using the module-level ``col()`` helper::
+/// Construct predicates using the module-level ``col()`` helper:
 ///
-///     pred = fc.col("user_id") > 1_000_000
-///     pred = (fc.col("revenue") >= 0) & (fc.col("revenue") <= 99_999)
+/// ```python
+/// pred = fc.col("user_id") > 1_000_000
+/// pred = (fc.col("revenue") >= 0) & (fc.col("revenue") <= 99_999)
+/// ```
 #[pyclass(name = "Predicate", module = "fluxcompress")]
 #[derive(Clone)]
 pub struct PyPredicate {
@@ -104,10 +106,12 @@ impl PyPredicate {
 
 /// Intermediate object returned by ``fc.col(name)``.
 ///
-/// Supports comparison operators to build predicates::
+/// Supports comparison operators to build predicates:
 ///
-///     fc.col("age") > 30
-///     fc.col("revenue").between(0, 99_999)
+/// ```python
+/// fc.col("age") > 30
+/// fc.col("revenue").between(0, 99_999)
+/// ```
 #[pyclass(name = "Column", module = "fluxcompress")]
 pub struct PyColumn {
     name: String,
@@ -325,24 +329,28 @@ impl PyFluxBuffer {
 /// Returns:
 ///     ``FluxBuffer`` — the compressed bytes with Atlas footer.
 ///
-/// Example::
+/// Example:
 ///
-///     import pyarrow as pa
-///     import fluxcompress as fc
+/// ```python
+/// import pyarrow as pa
+/// import fluxcompress as fc
 ///
-///     t = pa.table({"id": range(1_000_000)})
-///     buf = fc.compress(t)
-///     print(buf)  # FluxBuffer(312451 bytes)
+/// t = pa.table({"id": range(1_000_000)})
+/// buf = fc.compress(t)
+/// print(buf)  # FluxBuffer(312451 bytes)
+/// ```
 #[pyfunction]
-#[pyo3(signature = (table, strategy = "auto"))]
-fn compress(py: Python<'_>, table: &PyAny, strategy: &str) -> PyResult<PyFluxBuffer> {
+#[pyo3(signature = (table, strategy = "auto", profile = "speed"))]
+fn compress(py: Python<'_>, table: &PyAny, strategy: &str, profile: &str) -> PyResult<PyFluxBuffer> {
     let batch = pyarrow_to_record_batch(py, table)?;
 
     let forced = parse_strategy(strategy)?;
-    let writer = match forced {
+    let prof = parse_profile(profile)?;
+    let mut writer = match forced {
         Some(s) => FluxWriter::with_strategy(s),
         None    => FluxWriter::new(),
     };
+    writer.profile = prof;
 
     let data = writer.compress(&batch).map_err(flux_err)?;
     Ok(PyFluxBuffer { data })
@@ -358,9 +366,11 @@ fn compress(py: Python<'_>, table: &PyAny, strategy: &str) -> PyResult<PyFluxBuf
 /// Returns:
 ///     ``pyarrow.Table``
 ///
-/// Example::
+/// Example:
 ///
-///     table = fc.decompress(buf, predicate=fc.col("id") > 500_000)
+/// ```python
+/// table = fc.decompress(buf, predicate=fc.col("id") > 500_000)
+/// ```
 #[pyfunction]
 #[pyo3(signature = (buf, predicate=None, column_name="value"))]
 fn decompress(
@@ -396,11 +406,13 @@ fn decompress(
 ///     ``FileInfo`` with ``size_bytes``, ``num_blocks``, and a list of
 ///     ``BlockInfo`` objects (offset, z_min, z_max, strategy).
 ///
-/// Example::
+/// Example:
 ///
-///     info = fc.inspect(buf)
-///     for block in info.blocks:
-///         print(block.strategy, block.z_min, block.z_max)
+/// ```python
+/// info = fc.inspect(buf)
+/// for block in info.blocks:
+///     print(block.strategy, block.z_min, block.z_max)
+/// ```
 #[pyfunction]
 fn inspect(buf: &PyAny) -> PyResult<PyFileInfo> {
     let data: Vec<u8> = if let Ok(flux_buf) = buf.extract::<PyRef<PyFluxBuffer>>() {
@@ -426,10 +438,12 @@ fn inspect(buf: &PyAny) -> PyResult<PyFileInfo> {
 
 /// Return a ``Column`` expression for building predicates.
 ///
-/// Example::
+/// Example:
 ///
-///     pred = fc.col("user_id") > 1_000_000
-///     pred = (fc.col("revenue") >= 0) & (fc.col("revenue") <= 99_999)
+/// ```python
+/// pred = fc.col("user_id") > 1_000_000
+/// pred = (fc.col("revenue") >= 0) & (fc.col("revenue") <= 99_999)
+/// ```
 #[pyfunction]
 fn col(name: &str) -> PyColumn {
     PyColumn { name: name.to_string() }
@@ -460,86 +474,42 @@ fn write_flux(buf: PyRef<PyFluxBuffer>, path: &str) -> PyResult<()> {
 /// Supports: pyarrow.Table, pyarrow.RecordBatch, polars.DataFrame (via
 /// __arrow_c_stream__).
 fn pyarrow_to_record_batch(py: Python<'_>, obj: &PyAny) -> PyResult<RecordBatch> {
-    // Try the Arrow PyCapsule interface first (__arrow_c_stream__).
-    // This is zero-copy for pyarrow and polars >= 0.20.
-    if obj.hasattr("__arrow_c_stream__")? {
-        return pyarrow_via_c_stream(py, obj);
-    }
+    use arrow::pyarrow::FromPyArrow;
 
-    // Fallback: call obj.to_pydict() and reconstruct column by column.
-    // Less efficient but works with any mapping-like object.
-    pyarrow_via_to_pydict(py, obj)
-}
-
-fn pyarrow_via_c_stream(py: Python<'_>, obj: &PyAny) -> PyResult<RecordBatch> {
-    // Import pyarrow.
     let pa = py.import("pyarrow")?;
+    let pa_table_cls = pa.getattr("Table")?;
 
-    // Normalise to a pyarrow.RecordBatch via RecordBatch.from_batches.
-    let rb_cls = pa.getattr("RecordBatch")?;
-
-    // If it's a Table, get the first batch (or combine).
-    let batch = if obj.get_type().name()? == "Table" {
-        // table.to_batches() → list of RecordBatch
-        let batches: Vec<&PyAny> = obj.call_method0("to_batches")?.extract()?;
+    // If obj is a Table, combine into a single RecordBatch first.
+    let batch_obj: &PyAny = if obj.is_instance(pa_table_cls)? {
+        // table.combine_chunks().to_batches()[0] gives one contiguous batch.
+        let combined = obj.call_method0("combine_chunks")?;
+        let batches: Vec<&PyAny> = combined.call_method0("to_batches")?.extract()?;
         if batches.is_empty() {
             return Err(PyValueError::new_err("empty Arrow table"));
         }
-        // Concatenate all batches.
-        let concat_fn = pa.getattr("concat_tables")?;
-        let table_list = PyList::new(py, &[obj]);
-        let combined = concat_fn.call1((table_list,))?;
-        combined.call_method0("to_batches")?.extract::<Vec<&PyAny>>()?[0]
+        batches[0]
     } else {
         obj
     };
 
-    // Use the C Data Interface: batch.__arrow_c_stream__() returns a PyCapsule.
-    // We import via pyarrow's ipc machinery to reconstruct in Rust.
-    // For now, use the ipc.serialize_pandas path as a reliable bridge.
-    let ipc = pa.getattr("ipc")?;
-    let buf = ipc.call_method1("serialize", (batch,))?;
-    let raw_bytes: &[u8] = buf.call_method0("to_pybytes")?.extract()?;
-
-    // Deserialize the Arrow IPC message.
-    let cursor = std::io::Cursor::new(raw_bytes);
-    let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-    let mut batches: Vec<RecordBatch> = reader
-        .map(|b| b.map_err(|e| PyRuntimeError::new_err(e.to_string())))
-        .collect::<PyResult<_>>()?;
-
-    batches.pop().ok_or_else(|| PyValueError::new_err("no batches in IPC stream"))
+    // Arrow C Data Interface: zero-copy FFI from PyArrow → Rust Arrow.
+    // This avoids the IPC serialization round-trip entirely.
+    RecordBatch::from_pyarrow_bound(&batch_obj.as_borrowed())
+        .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))
 }
 
-fn pyarrow_via_to_pydict(_py: Python<'_>, _obj: &PyAny) -> PyResult<RecordBatch> {
-    Err(PyTypeError::new_err(
-        "Cannot convert object to Arrow RecordBatch. \
-         Pass a pyarrow.Table, pyarrow.RecordBatch, or polars.DataFrame."
-    ))
-}
-
-/// Serialize a Rust RecordBatch to a PyArrow Table via IPC.
+/// Convert a Rust RecordBatch to a PyArrow Table via Arrow C Data Interface (zero-copy).
 fn record_batch_to_pyarrow(py: Python<'_>, batch: &RecordBatch) -> PyResult<PyObject> {
-    use arrow::ipc::writer::StreamWriter;
+    use arrow::pyarrow::ToPyArrow;
 
-    let mut buf = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        writer.write(batch)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        writer.finish()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    }
+    // Zero-copy FFI: Rust Arrow → PyArrow RecordBatch.
+    let py_batch = batch.to_pyarrow(py)
+        .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))?;
 
-    // Import pyarrow and deserialise.
-    let pa   = py.import("pyarrow")?;
-    let ipc  = pa.getattr("ipc")?;
-    let pybytes = PyBytes::new(py, &buf);
-    let reader = ipc.call_method1("open_stream", (pybytes,))?;
-    let table  = reader.call_method0("read_all")?;
+    // Wrap in a Table for consistency with the rest of the API.
+    let pa = py.import("pyarrow")?;
+    let table_cls = pa.getattr("Table")?;
+    let table = table_cls.call_method1("from_batches", (vec![py_batch],))?;
     Ok(table.into())
 }
 
@@ -561,34 +531,47 @@ fn parse_strategy(s: &str) -> PyResult<Option<LoomStrategy>> {
     }
 }
 
+fn parse_profile(s: &str) -> PyResult<loom::CompressionProfile> {
+    match s {
+        "speed"    => Ok(loom::CompressionProfile::Speed),
+        "balanced" => Ok(loom::CompressionProfile::Balanced),
+        "archive"  => Ok(loom::CompressionProfile::Archive),
+        other      => Err(PyValueError::new_err(format!(
+            "unknown profile '{other}'. Use: speed|balanced|archive"
+        ))),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Module registration
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// FluxCompress — high-performance adaptive columnar compression.
 ///
-/// Quick start::
+/// Quick start:
 ///
-///     import pyarrow as pa
-///     import fluxcompress as fc
+/// ```python
+/// import pyarrow as pa
+/// import fluxcompress as fc
 ///
-///     # Compress
-///     table = pa.table({"id": range(1_000_000), "val": range(1_000_000)})
-///     buf = fc.compress(table)
+/// # Compress
+/// table = pa.table({"id": range(1_000_000), "val": range(1_000_000)})
+/// buf = fc.compress(table)
 ///
-///     # Decompress
-///     table2 = fc.decompress(buf)
+/// # Decompress
+/// table2 = fc.decompress(buf)
 ///
-///     # Predicate pushdown
-///     table3 = fc.decompress(buf, predicate=fc.col("id") > 500_000)
+/// # Predicate pushdown
+/// table3 = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 ///
-///     # Save / load
-///     fc.write_flux(buf, "data.flux")
-///     buf2 = fc.read_flux("data.flux")
+/// # Save / load
+/// fc.write_flux(buf, "data.flux")
+/// buf2 = fc.read_flux("data.flux")
 ///
-///     # Inspect
-///     info = fc.inspect(buf)
-///     print(f"{info.num_blocks} blocks, {info.size_bytes} bytes")
+/// # Inspect
+/// info = fc.inspect(buf)
+/// print(f"{info.num_blocks} blocks, {info.size_bytes} bytes")
+/// ```
 #[pymodule]
 fn _fluxcompress(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     // Classes

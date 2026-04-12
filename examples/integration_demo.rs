@@ -330,6 +330,9 @@ fn demo_cold_optimizer() {
             z_max: seg.iter().copied().max().unwrap_or(0),
             null_bitmap_offset: 0,
             strategy,
+            value_count: seg.len() as u32,
+            column_id: 0,
+            crc32: 0,
         });
         cold_bytes.extend_from_slice(&block);
     }

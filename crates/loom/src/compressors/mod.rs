@@ -10,4 +10,4 @@ pub mod dict_compressor;
 pub mod lz4_compressor;
 pub mod flux_writer;
 
-pub use flux_writer::{FluxWriter, compress_chunk};
+pub use flux_writer::{FluxWriter, compress_chunk, compress_chunk_with_profile};

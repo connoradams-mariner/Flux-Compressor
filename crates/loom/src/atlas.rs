@@ -40,14 +40,14 @@ use crate::{
     traits::Predicate,
 };
 
-/// Size of one serialised [`BlockMeta`] entry in bytes.
-pub const BLOCK_META_SIZE: usize = 50;
+/// Size of one serialised [`BlockMeta`] entry in bytes (v2: 60 bytes).
+pub const BLOCK_META_SIZE: usize = 60;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BlockMeta
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-block metadata stored in the Atlas footer.
+/// Per-block metadata stored in the Atlas footer (v2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockMeta {
     /// Byte offset of this block's data within the `.flux` file.
@@ -60,20 +60,28 @@ pub struct BlockMeta {
     pub null_bitmap_offset: u64,
     /// Which [`LoomStrategy`] was used to compress this block.
     pub strategy: LoomStrategy,
+    /// Number of values in this block.
+    pub value_count: u32,
+    /// Column index within the RecordBatch (for multi-column support).
+    pub column_id: u16,
+    /// CRC32 checksum of the compressed block data.
+    pub crc32: u32,
 }
 
 impl BlockMeta {
-    /// Serialise this entry to exactly [`BLOCK_META_SIZE`] bytes.
+    /// Serialise this entry to exactly [`BLOCK_META_SIZE`] bytes (v2: 60).
     pub fn to_bytes(&self) -> FluxResult<Vec<u8>> {
         let mut buf = Vec::with_capacity(BLOCK_META_SIZE);
         buf.write_u64::<LittleEndian>(self.block_offset)?;
-        // u128 as 2 × u64 (lo, hi).
         buf.write_u64::<LittleEndian>(self.z_min as u64)?;
         buf.write_u64::<LittleEndian>((self.z_min >> 64) as u64)?;
         buf.write_u64::<LittleEndian>(self.z_max as u64)?;
         buf.write_u64::<LittleEndian>((self.z_max >> 64) as u64)?;
         buf.write_u64::<LittleEndian>(self.null_bitmap_offset)?;
         buf.write_u16::<LittleEndian>(self.strategy.as_u16())?;
+        buf.write_u32::<LittleEndian>(self.value_count)?;
+        buf.write_u16::<LittleEndian>(self.column_id)?;
+        buf.write_u32::<LittleEndian>(self.crc32)?;
         debug_assert_eq!(buf.len(), BLOCK_META_SIZE);
         Ok(buf)
     }
@@ -99,6 +107,9 @@ impl BlockMeta {
         let strategy = LoomStrategy::from_u16(strategy_raw).ok_or_else(|| {
             FluxError::InvalidFile(format!("unknown strategy mask: {strategy_raw:#06x}"))
         })?;
+        let value_count = cur.read_u32::<LittleEndian>()?;
+        let column_id = cur.read_u16::<LittleEndian>()?;
+        let crc32 = cur.read_u32::<LittleEndian>()?;
 
         Ok(Self {
             block_offset,
@@ -106,6 +117,9 @@ impl BlockMeta {
             z_max: z_max_lo | (z_max_hi << 64),
             null_bitmap_offset,
             strategy,
+            value_count,
+            column_id,
+            crc32,
         })
     }
 
@@ -268,6 +282,9 @@ mod tests {
             z_max: max,
             null_bitmap_offset: 0,
             strategy: LoomStrategy::BitSlab,
+            value_count: 1024,
+            column_id: 0,
+            crc32: 0,
         }
     }
 

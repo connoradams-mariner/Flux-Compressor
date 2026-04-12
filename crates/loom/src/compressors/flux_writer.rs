@@ -50,63 +50,129 @@ use crate::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The primary [`LoomCompressor`] — writes `.flux` formatted byte buffers.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct FluxWriter {
     /// Force a specific strategy (useful for benchmarking).  `None` = auto.
     pub force_strategy: Option<LoomStrategy>,
+    /// Compression profile (Speed / Balanced / Archive).
+    pub profile: crate::CompressionProfile,
+}
+
+impl Default for FluxWriter {
+    fn default() -> Self {
+        Self {
+            force_strategy: None,
+            profile: crate::CompressionProfile::Speed,
+        }
+    }
 }
 
 impl FluxWriter {
-    /// Create a new `FluxWriter` with automatic strategy selection.
+    /// Create a new `FluxWriter` with automatic strategy selection (Speed profile).
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create a writer that always uses the given strategy (for benchmarks).
     pub fn with_strategy(strategy: LoomStrategy) -> Self {
-        Self { force_strategy: Some(strategy) }
+        Self { force_strategy: Some(strategy), ..Self::default() }
     }
+
+    /// Create a writer with a specific compression profile.
+    pub fn with_profile(profile: crate::CompressionProfile) -> Self {
+        Self { profile, ..Self::default() }
+    }
+}
+
+/// Minimum encoded block size to bother with secondary compression.
+/// Blocks smaller than this are left uncompressed — the LZ4/Zstd framing
+/// overhead would negate any savings.
+const MIN_SECONDARY_BLOCK_SIZE: usize = 64;
+
+/// Extracted column data — stores u64 natively to avoid u128 widening overhead.
+/// Only widens to u128 at the segment level (1K–64K values) instead of the
+/// full column (potentially millions of values). Halves memory bandwidth.
+pub struct ColumnData {
+    /// Column index in the RecordBatch.
+    pub col_id: u16,
+    /// Values as u64 (native width for all current Arrow integer/float types).
+    pub values_u64: Vec<u64>,
+    /// Null bitmap: bit `i` is 0 if row `i` is null. Empty if fully non-null.
+    pub null_bitmap: Vec<u8>,
+    /// Number of null values.
+    pub null_count: usize,
+    /// Total row count (including nulls).
+    pub row_count: usize,
 }
 
 impl LoomCompressor for FluxWriter {
     fn compress(&self, batch: &RecordBatch) -> FluxResult<Vec<u8>> {
-        let mut output: Vec<u8> = Vec::new();
+        use rayon::prelude::*;
+
+        // Step 1: Extract columns as u64 (half the memory of u128).
+        // Also extract null bitmaps for nullable columns.
+        let columns: Vec<ColumnData> = (0..batch.num_columns())
+            .map(|i| extract_column_data(batch.column(i).as_ref(), i as u16))
+            .collect::<FluxResult<_>>()?;
+
+        // Step 2: Compress each column in parallel.
+        let profile = self.profile;
+        let force = self.force_strategy;
+
+        let per_column: Vec<Vec<(Vec<u8>, BlockMeta)>> = columns
+            .par_iter()
+            .map(|col| {
+                // Convert only the dense (non-null) values to u128 for
+                // segmentation — this is the deferred widening.
+                let values_u128: Vec<u128> = col.values_u64.iter()
+                    .map(|&v| v as u128)
+                    .collect();
+
+                let segments = crate::segmenter::adaptive_segment(&values_u128, force);
+
+                let blocks: Vec<(Vec<u8>, BlockMeta)> = segments
+                    .into_par_iter()
+                    .map(|(chunk, strategy)| {
+                        let block_bytes = compress_chunk_with_profile(
+                            chunk, strategy, profile,
+                        )?;
+                        let crc = crc32fast::hash(&block_bytes);
+                        let z_min = chunk.iter().copied().min().unwrap_or(0);
+                        let z_max = chunk.iter().copied().max().unwrap_or(0);
+
+                        let meta = BlockMeta {
+                            block_offset: 0,
+                            z_min,
+                            z_max,
+                            null_bitmap_offset: 0,
+                            strategy,
+                            value_count: chunk.len() as u32,
+                            column_id: col.col_id,
+                            crc32: crc,
+                        };
+                        Ok((block_bytes, meta))
+                    })
+                    .collect::<FluxResult<_>>()?;
+                Ok(blocks)
+            })
+            .collect::<FluxResult<_>>()?;
+
+        // Step 3: Concatenate blocks, patch offsets.
+        let total_bytes: usize = per_column.iter()
+            .flat_map(|col| col.iter())
+            .map(|(bytes, _)| bytes.len())
+            .sum();
+        let mut output: Vec<u8> = Vec::with_capacity(total_bytes + 1024);
         let mut footer = AtlasFooter::new();
 
-        // Iterate over each column in the RecordBatch.
-        for col_idx in 0..batch.num_columns() {
-            let col = batch.column(col_idx);
-            let values = extract_as_u128(col.as_ref())?;
-
-            // Process in SEGMENT_SIZE chunks.
-            for chunk in values.chunks(SEGMENT_SIZE) {
-                let block_offset = output.len() as u64;
-
-                // Classify.
-                let strategy = self.force_strategy.unwrap_or_else(|| {
-                    classify(chunk).strategy
-                });
-
-                // Compress.
-                let block_bytes = compress_chunk(chunk, strategy)?;
-
-                // Compute block stats for Atlas.
-                let z_min = chunk.iter().copied().min().unwrap_or(0);
-                let z_max = chunk.iter().copied().max().unwrap_or(0);
-
+        for col_blocks in per_column {
+            for (block_bytes, mut meta) in col_blocks {
+                meta.block_offset = output.len() as u64;
                 output.extend_from_slice(&block_bytes);
-
-                footer.push(BlockMeta {
-                    block_offset,
-                    z_min,
-                    z_max,
-                    null_bitmap_offset: 0, // TODO: null bitmap support
-                    strategy,
-                });
+                footer.push(meta);
             }
         }
 
-        // Append the Atlas footer.
         output.extend(footer.to_bytes()?);
         Ok(output)
     }
@@ -121,19 +187,72 @@ pub fn compress_chunk(
     chunk: &[u128],
     strategy: LoomStrategy,
 ) -> FluxResult<Vec<u8>> {
-    match strategy {
-        LoomStrategy::Rle        => rle_compressor::compress(chunk),
+    compress_chunk_with_profile(chunk, strategy, crate::CompressionProfile::Speed)
+}
+
+/// Compress a chunk with a specific profile (applies secondary codec).
+pub fn compress_chunk_with_profile(
+    chunk: &[u128],
+    strategy: LoomStrategy,
+    profile: crate::CompressionProfile,
+) -> FluxResult<Vec<u8>> {
+    // Step 1: Strategy-specific encoding.
+    let encoded = match strategy {
+        LoomStrategy::Rle        => rle_compressor::compress(chunk)?,
         LoomStrategy::DeltaDelta => {
             if chunk.len() >= 2 {
-                delta_compressor::compress(chunk)
+                delta_compressor::compress(chunk)?
             } else {
-                // Fallback for tiny chunks.
-                bit_slab_compressor::compress(chunk)
+                bit_slab_compressor::compress(chunk)?
             }
         }
-        LoomStrategy::Dictionary => dict_compressor::compress(chunk),
-        LoomStrategy::BitSlab    => bit_slab_compressor::compress(chunk),
-        LoomStrategy::SimdLz4    => lz4_compressor::compress(chunk),
+        LoomStrategy::Dictionary => dict_compressor::compress(chunk)?,
+        LoomStrategy::BitSlab    => bit_slab_compressor::compress(chunk)?,
+        LoomStrategy::SimdLz4    => lz4_compressor::compress(chunk)?,
+    };
+
+    // Step 2: Secondary compression (if profile requires it).
+    // Skip secondary pass on tiny blocks — the framing overhead would negate savings.
+    let codec = profile.secondary_codec();
+    if encoded.len() < MIN_SECONDARY_BLOCK_SIZE {
+        return Ok(encoded);
+    }
+    match codec {
+        crate::SecondaryCodec::None => Ok(encoded),
+        crate::SecondaryCodec::Lz4 => {
+            // Layout: [TAG][LZ4 codec][u32: compressed_len][LZ4 payload]
+            let tag = encoded[0];
+            let inner = &encoded[2..]; // skip TAG + codec(0)
+            let compressed = lz4_flex::compress_prepend_size(inner);
+            // Only use secondary if it actually saves space.
+            if compressed.len() + 6 >= encoded.len() {
+                return Ok(encoded);
+            }
+            let mut out = Vec::with_capacity(2 + 4 + compressed.len());
+            out.push(tag);
+            out.push(crate::SecondaryCodec::Lz4 as u8);
+            out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            out.extend_from_slice(&compressed);
+            Ok(out)
+        }
+        crate::SecondaryCodec::Zstd => {
+            // Layout: [TAG][Zstd codec][u32: compressed_len][Zstd payload]
+            let tag = encoded[0];
+            let inner = &encoded[2..];
+            let compressed = zstd::stream::encode_all(inner, 3)
+                .map_err(|e| crate::error::FluxError::Internal(
+                    format!("zstd compress: {e}"),
+                ))?;
+            if compressed.len() + 6 >= encoded.len() {
+                return Ok(encoded);
+            }
+            let mut out = Vec::with_capacity(2 + 4 + compressed.len());
+            out.push(tag);
+            out.push(crate::SecondaryCodec::Zstd as u8);
+            out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+            out.extend_from_slice(&compressed);
+            Ok(out)
+        }
     }
 }
 
@@ -142,42 +261,85 @@ pub fn compress_chunk(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Extract all values from an Arrow array as `u128` (bit-cast / zero-extend).
-///
-/// This is zero-copy for integer arrays — we access the underlying Arrow
-/// `Buffer` directly without moving data between allocations.
+/// Used by external callers (CLI, integration demo). Internal FluxWriter uses
+/// the faster `extract_column_data` which stays in u64.
 pub fn extract_as_u128(array: &dyn Array) -> FluxResult<Vec<u128>> {
-    match array.data_type() {
+    let col = extract_column_data(array, 0)?;
+    Ok(col.values_u64.iter().map(|&v| v as u128).collect())
+}
+
+/// Extract column data as native u64 values + null bitmap.
+/// This is the fast path: u64 is half the memory of u128 and avoids the
+/// widening overhead for the full column.
+fn extract_column_data(array: &dyn Array, col_id: u16) -> FluxResult<ColumnData> {
+    let row_count = array.len();
+    let null_count = array.null_count();
+
+    // Extract null bitmap if there are any nulls.
+    let null_bitmap = if null_count > 0 {
+        if let Some(buf) = array.nulls() {
+            buf.buffer().as_slice()[..((row_count + 7) / 8)].to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Extract dense (non-null) values as u64.
+    let values_u64: Vec<u64> = match array.data_type() {
         DataType::UInt64 => {
             let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            Ok(arr.values().iter().map(|&v| v as u128).collect())
+            if null_count == 0 {
+                arr.values().to_vec()
+            } else {
+                arr.iter().filter_map(|v| v.map(|x| x)).collect()
+            }
         }
         DataType::Int64 => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            // Reinterpret as unsigned for bit-packing; sign is preserved in
-            // the two's-complement u128 representation.
-            Ok(arr.values().iter().map(|&v| v as u64 as u128).collect())
+            if null_count == 0 {
+                arr.values().iter().map(|&v| v as u64).collect()
+            } else {
+                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
+            }
         }
         DataType::UInt32 => {
             let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            Ok(arr.values().iter().map(|&v| v as u128).collect())
+            if null_count == 0 {
+                arr.values().iter().map(|&v| v as u64).collect()
+            } else {
+                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
+            }
         }
         DataType::Int32 => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            Ok(arr.values().iter().map(|&v| v as u32 as u128).collect())
+            if null_count == 0 {
+                arr.values().iter().map(|&v| v as u32 as u64).collect()
+            } else {
+                arr.iter().filter_map(|v| v.map(|x| x as u32 as u64)).collect()
+            }
         }
         DataType::Float64 => {
-            // Bit-cast f64 → u64 → u128 using num-traits to avoid UB.
             let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            Ok(arr
-                .values()
-                .iter()
-                .map(|&f| f.to_bits() as u128)
-                .collect())
+            if null_count == 0 {
+                arr.values().iter().map(|&f| f.to_bits()).collect()
+            } else {
+                arr.iter().filter_map(|v| v.map(|x| x.to_bits())).collect()
+            }
         }
-        dt => Err(FluxError::Internal(format!(
+        dt => return Err(FluxError::Internal(format!(
             "unsupported Arrow data type for FluxWriter: {dt}"
         ))),
-    }
+    };
+
+    Ok(ColumnData {
+        col_id,
+        values_u64,
+        null_bitmap,
+        null_count,
+        row_count,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +370,12 @@ mod tests {
         assert!(!bytes.is_empty(), "output should not be empty");
         // Verify Atlas footer can be parsed from the output.
         let footer = crate::atlas::AtlasFooter::from_file_tail(&bytes).unwrap();
-        assert_eq!(footer.blocks.len(), 2, "2048 values → 2 × 1024-row segments");
+        // Adaptive segmenter may merge into 1 segment if data is homogeneous.
+        assert!(
+            footer.blocks.len() >= 1 && footer.blocks.len() <= 2,
+            "expected 1–2 segments for 2048 sequential values, got {}",
+            footer.blocks.len(),
+        );
     }
 
     #[test]

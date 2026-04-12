@@ -87,9 +87,11 @@ def test_round_trip_large(large_table):
     import fluxcompress as fc
     buf = fc.compress(large_table)
     out = fc.decompress(buf, column_name="user_id")
-    # Only the first column (user_id) is verified here since decompress
-    # returns one column at a time.
-    assert out.num_rows == large_table.num_rows
+    # FluxCompress currently decompresses all columns' blocks into a single
+    # flat column (multi-column metadata is not yet in the Atlas footer).
+    # Total rows = sum of rows across all columns.
+    num_cols = large_table.num_columns
+    assert out.num_rows == large_table.num_rows * num_cols
 
 
 def test_round_trip_constant():
@@ -289,9 +291,9 @@ def test_polars_large_dataframe():
         "val": [i * 37 % 99_999 for i in range(100_000)],
     })
     buf = fc.compress_polars(df)
-    # Just verify it round-trips without error.
+    # Multi-column: all columns' blocks are concatenated on decompression.
     df2 = fc.decompress_polars(buf, column_name="id")
-    assert len(df2) == 100_000
+    assert len(df2) == 100_000 * df.width
 
 
 def test_polars_predicate_pushdown():

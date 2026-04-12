@@ -9,6 +9,7 @@
 
 use crate::{
     error::{FluxError, FluxResult},
+    SecondaryCodec,
     compressors::{
         bit_slab_compressor,
         rle_compressor,
@@ -20,12 +21,58 @@ use crate::{
 
 /// Decompress a single block starting at `data[0]`.
 ///
+/// Handles secondary decompression (LZ4/Zstd wrapper) transparently:
+/// reads the `secondary_codec` byte at `data[1]` and unwraps if needed
+/// before dispatching to the strategy-specific decoder.
+///
 /// Returns `(values, bytes_consumed)`.
 pub fn decompress_block(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
-    let tag = *data.first().ok_or_else(|| {
-        FluxError::InvalidFile("empty block".into())
+    if data.len() < 2 {
+        return Err(FluxError::InvalidFile("block too short".into()));
+    }
+    let tag = data[0];
+    let secondary = SecondaryCodec::from_u8(data[1]).ok_or_else(|| {
+        FluxError::InvalidFile(format!("unknown secondary codec: {:#04x}", data[1]))
     })?;
 
+    // If there is a secondary codec, read the compressed_len prefix,
+    // extract only that many bytes, and decompress.
+    let inner_data: Vec<u8>;
+    let dispatch_data: &[u8] = match secondary {
+        SecondaryCodec::None => data,
+        SecondaryCodec::Lz4 => {
+            // Layout: [TAG][LZ4][u32: compressed_len][LZ4 payload]
+            if data.len() < 6 {
+                return Err(FluxError::InvalidFile("LZ4 block too short".into()));
+            }
+            let comp_len = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
+            let payload = &data[6..6 + comp_len];
+            inner_data = lz4_flex::decompress_size_prepended(payload)
+                .map_err(|e| FluxError::Lz4(e.to_string()))?;
+            let mut rebuilt = vec![tag, 0u8];
+            rebuilt.extend_from_slice(&inner_data);
+            return decompress_inner(&rebuilt);
+        }
+        SecondaryCodec::Zstd => {
+            if data.len() < 6 {
+                return Err(FluxError::InvalidFile("Zstd block too short".into()));
+            }
+            let comp_len = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
+            let payload = &data[6..6 + comp_len];
+            inner_data = zstd::stream::decode_all(payload)
+                .map_err(|e| FluxError::Internal(format!("zstd decompress: {e}")))?;
+            let mut rebuilt = vec![tag, 0u8];
+            rebuilt.extend_from_slice(&inner_data);
+            return decompress_inner(&rebuilt);
+        }
+    };
+
+    decompress_inner(dispatch_data)
+}
+
+/// Inner dispatch to the strategy-specific decompressor.
+fn decompress_inner(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
+    let tag = data[0];
     match tag {
         rle_compressor::TAG        => rle_compressor::decompress(data),
         delta_compressor::TAG      => delta_compressor::decompress(data),
