@@ -1,0 +1,87 @@
+[build-system]
+requires      = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name        = "fluxcompress"
+version     = "0.1.0"
+description = "High-performance adaptive columnar compression for Python (Polars, Spark, PyArrow)"
+readme      = "README.md"
+license     = { text = "Apache-2.0" }
+authors     = [{ name = "FluxCompress Contributors" }]
+requires-python = ">=3.8"
+keywords    = ["compression", "columnar", "arrow", "parquet", "polars", "spark"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Archiving :: Compression",
+]
+
+# Runtime dependencies (PyArrow is required; Polars is optional).
+dependencies = [
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+polars = ["polars>=0.20"]
+spark  = ["pyspark>=3.4"]
+dev    = [
+    "maturin>=1.5",
+    "pytest>=7",
+    "pytest-benchmark",
+    "polars>=0.20",
+    "numpy",
+    "pyarrow>=14.0",
+]
+
+[project.urls]
+Homepage   = "https://github.com/connoradams-mariner/Flux-Compressor"
+Repository = "https://github.com/connoradams-mariner/Flux-Compressor"
+Issues     = "https://github.com/connoradams-mariner/Flux-Compressor/issues"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Maturin configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.maturin]
+# Path to the Rust crate that contains the PyO3 bindings.
+manifest-path    = "crates/python/Cargo.toml"
+
+# The compiled extension module name (must match #[pymodule] name in lib.rs).
+module-name      = "fluxcompress._fluxcompress"
+
+# Python source package directory.
+python-source    = "python"
+
+# Build for the stable ABI (abi3) so one wheel works on Python 3.8+.
+# Removes the need to build separate wheels per CPython minor version.
+features         = ["pyo3/abi3-py38"]
+
+# Strip debug symbols in release builds (smaller wheels).
+strip            = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Development tooling
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths  = ["python/tests"]
+addopts    = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

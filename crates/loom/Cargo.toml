@@ -31,6 +31,9 @@ criterion.workspace   = true
 name    = "bit_slab"
 harness = false
 
+[[example]]
+name = "integration_demo"
+
 [features]
 default  = ["simd-avx2"]
 simd-avx2 = []   # enables AVX2 SIMD paths (x86_64)

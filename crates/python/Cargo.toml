@@ -1,0 +1,36 @@
+[package]
+name        = "fluxcompress-python"
+description = "Python bindings for FluxCompress via PyO3"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[lib]
+# cdylib = Python extension (.so / .pyd)
+# rlib   = keeps the crate usable from other Rust crates in tests
+name       = "fluxcompress"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+loom         = { path = "../loom" }
+pyo3         = { version = "0.21", features = ["extension-module", "abi3-py38"] }
+arrow        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+byteorder    = { workspace = true }
+thiserror    = { workspace = true }
+
+# PyArrow C Data Interface – zero-copy Arrow ↔ Python bridge
+pyo3-arrow  = "0.4"
+
+[features]
+default      = ["simd-avx2"]
+simd-avx2    = ["loom/simd-avx2"]
+simd-neon    = ["loom/simd-neon"]
+
+# Required by maturin for stable ABI builds
+[package.metadata.maturin]
+python-source = "python"
+module-name   = "fluxcompress._fluxcompress"
