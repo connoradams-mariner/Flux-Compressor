@@ -38,6 +38,9 @@ rayon       = "1.10"
 # Integrity
 crc32fast   = "1"
 
+# Memory-mapped I/O
+memmap2     = "0.9"
+
 # Serialisation (transaction log)
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
@@ -48,6 +51,7 @@ pyo3        = { version = "0.21", features = ["extension-module", "abi3-py38"] }
 # CLI
 clap        = { version = "4", features = ["derive"] }
 polars      = { version = "0.40", features = ["lazy", "parquet", "ipc"] }
+parquet     = { version = "52", features = ["snap", "zstd", "lz4"] }
 
 # Error handling
 thiserror   = "1"

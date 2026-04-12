@@ -3,300 +3,193 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Scaling benchmark: FluxCompress vs Parquet across row counts from 1K to 50M.
+Complete scaling benchmark: FluxCompress vs Parquet vs Feather.
 
-Generates 3 charts:
-  1. Compression ratio vs row count
-  2. Compress speed (MB/s) vs row count
-  3. Decompress speed (MB/s) vs row count
-
-Also extrapolates to TB-scale based on observed scaling curves.
+Tests single-column and multi-column tables from 1K to 100M rows.
+Generates charts and TB extrapolations.
 
 Usage:
     python python/tests/bench_scaling.py
 """
 
 from __future__ import annotations
-
-import gc
-import io
-import time
-from dataclasses import dataclass
+import gc, io, time, sys
+from dataclasses import dataclass, field
 from typing import List
 
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-
+import pyarrow.feather as feather
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────────────────────────────────────
 
-SIZES = [
-    1_000,
-    10_000,
-    100_000,
-    1_000_000,
-    5_000_000,
-    10_000_000,
-    50_000_000,
-]
+SINGLE_COL_SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000, 50_000_000, 100_000_000]
+MULTI_COL_SIZES  = [1_000, 10_000, 100_000, 1_000_000, 10_000_000, 50_000_000]
 
-# Use sequential data — the most common real-world pattern (IDs, timestamps).
-def make_table(n: int) -> pa.Table:
+def make_single(n):
     return pa.table({"value": pa.array(range(n), type=pa.uint64())})
 
+def make_multi(n):
+    return pa.table({
+        "user_id":    pa.array(range(n), type=pa.uint64()),
+        "revenue":    pa.array([i * 37 % 99_999 for i in range(n)], type=pa.uint64()),
+        "region":     pa.array([i % 8 for i in range(n)], type=pa.uint64()),
+        "session_ms": pa.array([(i * 1234) % 86_400_000 for i in range(n)], type=pa.int64()),
+    })
 
 @dataclass
-class Result:
-    name: str
-    rows: int
-    raw_bytes: int
-    compressed_bytes: int
-    ratio: float
-    compress_ms: float
-    decompress_ms: float
-    compress_mbs: float
-    decompress_mbs: float
+class R:
+    name: str; kind: str; rows: int; raw: int; comp: int
+    ratio: float; c_ms: float; d_ms: float; c_mbs: float; d_mbs: float
 
+def _mbs(raw, ms): return (raw/1e6)/(ms/1000) if ms > 0 else float("inf")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Benchmark runners
-# ─────────────────────────────────────────────────────────────────────────────
-
-def bench_flux(table: pa.Table, profile: str) -> Result:
+def bench_flux(table, profile, kind):
     import fluxcompress as fc
-    raw = table.num_rows * 8
-    gc.collect()
-
+    raw = sum(c.nbytes for c in table.columns); gc.collect()
     t0 = time.perf_counter()
     buf = fc.compress(table, profile=profile)
-    comp_ms = (time.perf_counter() - t0) * 1000
-
+    c_ms = (time.perf_counter()-t0)*1000
     t1 = time.perf_counter()
     _ = fc.decompress(buf)
-    decomp_ms = (time.perf_counter() - t1) * 1000
+    d_ms = (time.perf_counter()-t1)*1000
+    return R(f"Flux ({profile})", kind, table.num_rows, raw, len(buf),
+             raw/max(len(buf),1), c_ms, d_ms, _mbs(raw,c_ms), _mbs(raw,d_ms))
 
-    comp_mbs = (raw / 1e6) / (comp_ms / 1000) if comp_ms > 0 else float("inf")
-    decomp_mbs = (raw / 1e6) / (decomp_ms / 1000) if decomp_ms > 0 else float("inf")
+def bench_pq(table, codec, kind):
+    raw = sum(c.nbytes for c in table.columns); gc.collect()
+    s = io.BytesIO()
+    t0 = time.perf_counter(); pq.write_table(table, s, compression=codec)
+    c_ms = (time.perf_counter()-t0)*1000; comp = s.tell()
+    s.seek(0); t1 = time.perf_counter(); _ = pq.read_table(s)
+    d_ms = (time.perf_counter()-t1)*1000
+    return R(f"Parquet ({codec})", kind, table.num_rows, raw, comp,
+             raw/max(comp,1), c_ms, d_ms, _mbs(raw,c_ms), _mbs(raw,d_ms))
 
-    return Result(
-        name=f"Flux ({profile})",
-        rows=table.num_rows,
-        raw_bytes=raw,
-        compressed_bytes=len(buf),
-        ratio=raw / max(len(buf), 1),
-        compress_ms=comp_ms,
-        decompress_ms=decomp_ms,
-        compress_mbs=comp_mbs,
-        decompress_mbs=decomp_mbs,
-    )
-
-
-def bench_parquet(table: pa.Table, codec: str) -> Result:
-    raw = table.num_rows * 8
-    gc.collect()
-
-    sink = io.BytesIO()
-    t0 = time.perf_counter()
-    pq.write_table(table, sink, compression=codec)
-    comp_ms = (time.perf_counter() - t0) * 1000
-    comp_bytes = sink.tell()
-
-    sink.seek(0)
-    t1 = time.perf_counter()
-    _ = pq.read_table(sink)
-    decomp_ms = (time.perf_counter() - t1) * 1000
-
-    comp_mbs = (raw / 1e6) / (comp_ms / 1000) if comp_ms > 0 else float("inf")
-    decomp_mbs = (raw / 1e6) / (decomp_ms / 1000) if decomp_ms > 0 else float("inf")
-
-    return Result(
-        name=f"Parquet ({codec})",
-        rows=table.num_rows,
-        raw_bytes=raw,
-        compressed_bytes=comp_bytes,
-        ratio=raw / max(comp_bytes, 1),
-        compress_ms=comp_ms,
-        decompress_ms=decomp_ms,
-        compress_mbs=comp_mbs,
-        decompress_mbs=decomp_mbs,
-    )
-
+def bench_feather(table, kind):
+    raw = sum(c.nbytes for c in table.columns); gc.collect()
+    s = io.BytesIO()
+    t0 = time.perf_counter(); feather.write_feather(table, s, compression="lz4")
+    c_ms = (time.perf_counter()-t0)*1000; comp = s.tell()
+    s.seek(0); t1 = time.perf_counter(); _ = feather.read_table(s)
+    d_ms = (time.perf_counter()-t1)*1000
+    return R("Feather (lz4)", kind, table.num_rows, raw, comp,
+             raw/max(comp,1), c_ms, d_ms, _mbs(raw,c_ms), _mbs(raw,d_ms))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run benchmarks
-# ─────────────────────────────────────────────────────────────────────────────
 
-def run_all() -> List[Result]:
+def run_all():
     results = []
-    for n in SIZES:
-        print(f"  Benchmarking {n:>12,} rows ...", end="", flush=True)
-        table = make_table(n)
+    for n in SINGLE_COL_SIZES:
+        print(f"  Single-col {n:>12,} rows ...", end="", flush=True)
+        t = make_single(n)
+        results.append(bench_flux(t, "balanced", "single"))
+        results.append(bench_flux(t, "archive", "single"))
+        results.append(bench_pq(t, "snappy", "single"))
+        results.append(bench_pq(t, "zstd", "single"))
+        results.append(bench_feather(t, "single"))
+        del t; gc.collect(); print(" done")
 
-        results.append(bench_flux(table, "speed"))
-        results.append(bench_flux(table, "balanced"))
-        results.append(bench_flux(table, "archive"))
-        results.append(bench_parquet(table, "snappy"))
-        results.append(bench_parquet(table, "zstd"))
-
-        del table
-        gc.collect()
-        print(" done")
+    for n in MULTI_COL_SIZES:
+        print(f"  Multi-col  {n:>12,} rows ...", end="", flush=True)
+        t = make_multi(n)
+        results.append(bench_flux(t, "balanced", "multi"))
+        results.append(bench_flux(t, "archive", "multi"))
+        results.append(bench_pq(t, "snappy", "multi"))
+        results.append(bench_pq(t, "zstd", "multi"))
+        results.append(bench_feather(t, "multi"))
+        del t; gc.collect(); print(" done")
 
     return results
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Plot charts
 # ─────────────────────────────────────────────────────────────────────────────
 
-COLORS = {
-    "Flux (speed)": "#2196F3",
-    "Flux (balanced)": "#4CAF50",
-    "Flux (archive)": "#FF9800",
-    "Parquet (snappy)": "#9C27B0",
-    "Parquet (zstd)": "#F44336",
+PALETTE = {
+    "Flux (balanced)": ("#4CAF50","s"),
+    "Flux (archive)":  ("#FF9800","D"),
+    "Parquet (snappy)":("#9C27B0","^"),
+    "Parquet (zstd)":  ("#F44336","v"),
+    "Feather (lz4)":   ("#607D8B","x"),
 }
 
-MARKERS = {
-    "Flux (speed)": "o",
-    "Flux (balanced)": "s",
-    "Flux (archive)": "D",
-    "Parquet (snappy)": "^",
-    "Parquet (zstd)": "v",
-}
-
-
-def plot_scaling(results: List[Result], output_path: str):
+def plot(results, kind, title_suffix, path):
     fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-    fig.suptitle("FluxCompress vs Parquet — Scaling Benchmark (Sequential u64 Data)",
-                 fontsize=14, fontweight="bold")
+    fig.suptitle(f"FluxCompress vs Parquet — {title_suffix}", fontsize=14, fontweight="bold")
+    rs = [r for r in results if r.kind == kind]
 
-    names = list(COLORS.keys())
+    for name,(c,m) in PALETTE.items():
+        xs = [r.rows for r in rs if r.name==name]
+        # Ratio
+        ys = [r.ratio for r in rs if r.name==name]
+        if xs: axes[0].plot(xs, ys, marker=m, color=c, label=name, linewidth=2)
+        # Compress speed
+        ys = [r.c_mbs for r in rs if r.name==name]
+        if xs: axes[1].plot(xs, ys, marker=m, color=c, label=name, linewidth=2)
+        # Decompress speed
+        ys = [r.d_mbs for r in rs if r.name==name]
+        if xs: axes[2].plot(xs, ys, marker=m, color=c, label=name, linewidth=2)
 
-    # ── Chart 1: Compression Ratio ────────────────────────────────────────
-    ax1 = axes[0]
-    for name in names:
-        xs = [r.rows for r in results if r.name == name]
-        ys = [r.ratio for r in results if r.name == name]
-        ax1.plot(xs, ys, marker=MARKERS[name], color=COLORS[name], label=name, linewidth=2)
-    ax1.set_xscale("log")
-    ax1.set_yscale("log")
-    ax1.set_xlabel("Rows")
-    ax1.set_ylabel("Compression Ratio (×)")
-    ax1.set_title("Compression Ratio")
-    ax1.legend(fontsize=8)
-    ax1.grid(True, alpha=0.3)
+    for i,(t,yl) in enumerate([("Compression Ratio","Ratio (×)"),("Compress Speed","MB/s"),("Decompress Speed","MB/s")]):
+        axes[i].set_xscale("log"); axes[i].set_xlabel("Rows"); axes[i].set_ylabel(yl)
+        axes[i].set_title(t); axes[i].legend(fontsize=8); axes[i].grid(True, alpha=0.3)
+    if kind=="single": axes[0].set_yscale("log")
 
-    # ── Chart 2: Compress Speed (MB/s) ────────────────────────────────────
-    ax2 = axes[1]
-    for name in names:
-        xs = [r.rows for r in results if r.name == name]
-        ys = [r.compress_mbs for r in results if r.name == name]
-        ax2.plot(xs, ys, marker=MARKERS[name], color=COLORS[name], label=name, linewidth=2)
-    ax2.set_xscale("log")
-    ax2.set_xlabel("Rows")
-    ax2.set_ylabel("Throughput (MB/s)")
-    ax2.set_title("Compress Speed")
-    ax2.legend(fontsize=8)
-    ax2.grid(True, alpha=0.3)
+    plt.tight_layout(); plt.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"  Chart saved: {path}")
 
-    # ── Chart 3: Decompress Speed (MB/s) ──────────────────────────────────
-    ax3 = axes[2]
-    for name in names:
-        xs = [r.rows for r in results if r.name == name]
-        ys = [r.decompress_mbs for r in results if r.name == name]
-        ax3.plot(xs, ys, marker=MARKERS[name], color=COLORS[name], label=name, linewidth=2)
-    ax3.set_xscale("log")
-    ax3.set_xlabel("Rows")
-    ax3.set_ylabel("Throughput (MB/s)")
-    ax3.set_title("Decompress Speed")
-    ax3.legend(fontsize=8)
-    ax3.grid(True, alpha=0.3)
+def extrapolate(results, kind, raw_per_row):
+    tb = 1_000_000_000_000
+    tb_rows = tb // raw_per_row
+    print(f"\n{'='*75}")
+    print(f"TB Extrapolation — {kind}-column ({tb_rows/1e9:.0f}B rows, {raw_per_row}B/row)")
+    print(f"{'='*75}")
+    print(f"{'Format':<20} {'Est. Size':>12} {'Comp Time':>12} {'Decomp Time':>12}")
+    print("-"*75)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"\n  Chart saved to: {output_path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TB extrapolation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extrapolate_tb(results: List[Result]):
-    tb_rows = 125_000_000_000  # ~1 TB of u64 data
-    tb_bytes = tb_rows * 8
-
-    print("\n" + "=" * 70)
-    print("Extrapolation to 1 TB (125 billion rows of u64)")
-    print("=" * 70)
-    print(f"{'Format':<20} {'Est. Size':>12} {'Est. Comp Time':>15} {'Est. Decomp':>12}")
-    print("-" * 70)
-
-    for name in COLORS.keys():
-        # Use the two largest data points to extrapolate
-        pts = [(r.rows, r) for r in results if r.name == name]
-        pts.sort(key=lambda x: x[0])
-        if len(pts) < 2:
-            continue
-
-        # Use last point's throughput (asymptotic behavior)
+    for name in PALETTE:
+        pts = sorted([(r.rows,r) for r in results if r.name==name and r.kind==kind])
+        if not pts: continue
         last = pts[-1][1]
-        est_ratio = last.ratio
-        est_size_bytes = tb_bytes / est_ratio
-        est_comp_s = tb_bytes / 1e6 / last.compress_mbs if last.compress_mbs > 0 else float("inf")
-        est_decomp_s = tb_bytes / 1e6 / last.decompress_mbs if last.decompress_mbs > 0 else float("inf")
+        est_size = tb / last.ratio
+        est_comp = (tb/1e6)/last.c_mbs if last.c_mbs>0 else float("inf")
+        est_decomp = (tb/1e6)/last.d_mbs if last.d_mbs>0 else float("inf")
 
-        def human_bytes(b):
-            if b < 1e9:
-                return f"{b / 1e6:.0f} MB"
-            return f"{b / 1e9:.1f} GB"
-
-        def human_time(s):
-            if s < 60:
-                return f"{s:.0f}s"
-            if s < 3600:
-                return f"{s / 60:.1f} min"
-            return f"{s / 3600:.1f} hr"
-
-        print(
-            f"{name:<20} {human_bytes(est_size_bytes):>12} "
-            f"{human_time(est_comp_s):>15} {human_time(est_decomp_s):>12}"
-        )
-    print("=" * 70)
-    print("(Extrapolated from 50M-row throughput; actual TB performance may vary)")
-
+        def hb(b):
+            if b<1e9: return f"{b/1e6:.0f} MB"
+            return f"{b/1e9:.1f} GB"
+        def ht(s):
+            if s<60: return f"{s:.0f}s"
+            if s<3600: return f"{s/60:.1f} min"
+            return f"{s/3600:.1f} hr"
+        print(f"{name:<20} {hb(est_size):>12} {ht(est_comp):>12} {ht(est_decomp):>12}")
+    print("="*75)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main
+
+def print_table(results):
+    print(f"\n{'Rows':>12} {'Kind':<6} {'Format':<20} {'Size':>10} {'Ratio':>7} {'C MB/s':>8} {'D MB/s':>8}")
+    print("-"*80)
+    for r in results:
+        def h(b):
+            if b<1024: return f"{b} B"
+            if b<1e6: return f"{b/1024:.1f}KB"
+            if b<1e9: return f"{b/1e6:.1f}MB"
+            return f"{b/1e9:.2f}GB"
+        print(f"{r.rows:>12,} {r.kind:<6} {r.name:<20} {h(r.comp):>10} {r.ratio:>6.1f}x {r.c_mbs:>7.0f} {r.d_mbs:>7.0f}")
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("FluxCompress vs Parquet — Scaling Benchmark")
-    print("Pattern: Sequential u64 (IDs / timestamps)")
-    print()
-
+    print("FluxCompress vs Parquet — Complete Scaling Benchmark\n")
     results = run_all()
+    print_table(results)
 
-    # Print table
-    print(f"\n{'Rows':>12} {'Format':<20} {'Size':>10} {'Ratio':>7} {'Comp MB/s':>10} {'Decomp MB/s':>11}")
-    print("-" * 75)
-    for r in results:
-        def h(b):
-            if b < 1024: return f"{b} B"
-            if b < 1e6: return f"{b/1024:.1f} KB"
-            if b < 1e9: return f"{b/1e6:.1f} MB"
-            return f"{b/1e9:.2f} GB"
-        print(
-            f"{r.rows:>12,} {r.name:<20} {h(r.compressed_bytes):>10} "
-            f"{r.ratio:>7.1f}x {r.compress_mbs:>9.0f} {r.decompress_mbs:>11.0f}"
-        )
+    plot(results, "single", "Single Column (Sequential u64)", "docs/scaling_single_col.png")
+    plot(results, "multi",  "Multi-Column (4 cols, mixed patterns)", "docs/scaling_multi_col.png")
 
-    output_path = "docs/scaling_benchmark.png"
-    plot_scaling(results, output_path)
-    extrapolate_tb(results)
+    extrapolate(results, "single", 8)
+    extrapolate(results, "multi", 32)

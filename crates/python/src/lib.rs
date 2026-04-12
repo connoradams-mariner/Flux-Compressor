@@ -340,8 +340,14 @@ impl PyFluxBuffer {
 /// print(buf)  # FluxBuffer(312451 bytes)
 /// ```
 #[pyfunction]
-#[pyo3(signature = (table, strategy = "auto", profile = "speed"))]
-fn compress(py: Python<'_>, table: &PyAny, strategy: &str, profile: &str) -> PyResult<PyFluxBuffer> {
+#[pyo3(signature = (table, strategy = "auto", profile = "speed", u64_only = false))]
+fn compress(
+    py: Python<'_>,
+    table: &PyAny,
+    strategy: &str,
+    profile: &str,
+    u64_only: bool,
+) -> PyResult<PyFluxBuffer> {
     let batch = pyarrow_to_record_batch(py, table)?;
 
     let forced = parse_strategy(strategy)?;
@@ -351,6 +357,7 @@ fn compress(py: Python<'_>, table: &PyAny, strategy: &str, profile: &str) -> PyR
         None    => FluxWriter::new(),
     };
     writer.profile = prof;
+    writer.u64_only = u64_only;
 
     let data = writer.compress(&batch).map_err(flux_err)?;
     Ok(PyFluxBuffer { data })

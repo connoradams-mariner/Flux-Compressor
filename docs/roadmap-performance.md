@@ -43,9 +43,10 @@ gain detection).
 ## Planned Optimizations
 
 ### Phase 1: Lazy Per-Segment Widening (v0.2)
-**Status:** Partially done — extraction is u64, but each rayon closure still
-creates a full `Vec<u128>` for the entire column before segmenting.
-**Impact:** High (estimated 2× compress speedup on single-column 10M+ data)
+**Status:** Done — `adaptive_segment_u64()` works on `&[u64]` directly,
+only widening 1024-value probe windows for classification. Each segment
+is widened to u128 individually (max 64K values = 1MB).
+**Impact:** +39% compress throughput at 10M rows (Speed profile).
 
 The current code does:
 ```

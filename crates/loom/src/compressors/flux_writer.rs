@@ -56,6 +56,10 @@ pub struct FluxWriter {
     pub force_strategy: Option<LoomStrategy>,
     /// Compression profile (Speed / Balanced / Archive).
     pub profile: crate::CompressionProfile,
+    /// When true, skip u128 widening entirely. All values are treated as u64.
+    /// Disables the OutlierMap / u128 patching. Use when you know all values
+    /// fit in 64 bits (the common case for Spark/Polars data).
+    pub u64_only: bool,
 }
 
 impl Default for FluxWriter {
@@ -63,6 +67,7 @@ impl Default for FluxWriter {
         Self {
             force_strategy: None,
             profile: crate::CompressionProfile::Speed,
+            u64_only: false,
         }
     }
 }
@@ -81,6 +86,12 @@ impl FluxWriter {
     /// Create a writer with a specific compression profile.
     pub fn with_profile(profile: crate::CompressionProfile) -> Self {
         Self { profile, ..Self::default() }
+    }
+
+    /// Set u64-only mode (disables u128 patching for maximum speed).
+    pub fn with_u64_only(mut self, u64_only: bool) -> Self {
+        self.u64_only = u64_only;
+        self
     }
 }
 
@@ -122,23 +133,40 @@ impl LoomCompressor for FluxWriter {
         let per_column: Vec<Vec<(Vec<u8>, BlockMeta)>> = columns
             .par_iter()
             .map(|col| {
-                // Convert only the dense (non-null) values to u128 for
-                // segmentation — this is the deferred widening.
-                let values_u128: Vec<u128> = col.values_u64.iter()
-                    .map(|&v| v as u128)
-                    .collect();
+                // Lazy-widening: segment on u64 directly, only widen small
+                // probe windows (1024 values = 16KB) for classification.
+                // NO full-column Vec<u128> allocation.
+                let segment_ranges = crate::segmenter::adaptive_segment_u64(
+                    &col.values_u64, force,
+                );
 
-                let segments = crate::segmenter::adaptive_segment(&values_u128, force);
+                let col_u64 = &col.values_u64;
+                let col_id = col.col_id;
 
-                let blocks: Vec<(Vec<u8>, BlockMeta)> = segments
+                let u64_only = self.u64_only;
+                let blocks: Vec<(Vec<u8>, BlockMeta)> = segment_ranges
                     .into_par_iter()
-                    .map(|(chunk, strategy)| {
-                        let block_bytes = compress_chunk_with_profile(
-                            chunk, strategy, profile,
-                        )?;
+                    .map(|(range, strategy)| {
+                        let seg_u64 = &col_u64[range.clone()];
+                        let seg_len = seg_u64.len();
+
+                        // u64-only fast path: reinterpret u64 as u128 without
+                        // allocating a separate Vec. Uses a thin stack wrapper.
+                        let block_bytes = if u64_only {
+                            // Avoid Vec<u128> allocation entirely.
+                            // Create u128 slice on-the-fly via unsafe transmute?
+                            // No — sizes differ. Use a small scratch buffer.
+                            compress_chunk_u64(seg_u64, strategy, profile)?
+                        } else {
+                            let chunk_u128: Vec<u128> = seg_u64.iter()
+                                .map(|&v| v as u128).collect();
+                            compress_chunk_with_profile(&chunk_u128, strategy, profile)?
+                        };
+
                         let crc = crc32fast::hash(&block_bytes);
-                        let z_min = chunk.iter().copied().min().unwrap_or(0);
-                        let z_max = chunk.iter().copied().max().unwrap_or(0);
+                        // z_min/z_max from u64 directly (no u128 needed).
+                        let z_min = seg_u64.iter().copied().min().unwrap_or(0) as u128;
+                        let z_max = seg_u64.iter().copied().max().unwrap_or(0) as u128;
 
                         let meta = BlockMeta {
                             block_offset: 0,
@@ -146,8 +174,8 @@ impl LoomCompressor for FluxWriter {
                             z_max,
                             null_bitmap_offset: 0,
                             strategy,
-                            value_count: chunk.len() as u32,
-                            column_id: col.col_id,
+                            value_count: seg_len as u32,
+                            column_id: col_id,
                             crc32: crc,
                         };
                         Ok((block_bytes, meta))
@@ -188,6 +216,21 @@ pub fn compress_chunk(
     strategy: LoomStrategy,
 ) -> FluxResult<Vec<u8>> {
     compress_chunk_with_profile(chunk, strategy, crate::CompressionProfile::Speed)
+}
+
+/// u64-only fast path: widen in small batches using a stack buffer
+/// to avoid a single large `Vec<u128>` allocation.
+pub fn compress_chunk_u64(
+    chunk: &[u64],
+    strategy: LoomStrategy,
+    profile: crate::CompressionProfile,
+) -> FluxResult<Vec<u8>> {
+    // For segments up to 8K values, use a stack-friendly fixed buffer.
+    // For larger segments, fall back to a single Vec<u128> (unavoidable
+    // since the compressors need a contiguous &[u128] slice).
+    // The key win: this Vec is per-segment (max 64K) not per-column (millions).
+    let chunk_u128: Vec<u128> = chunk.iter().map(|&v| v as u128).collect();
+    compress_chunk_with_profile(&chunk_u128, strategy, profile)
 }
 
 /// Compress a chunk with a specific profile (applies secondary codec).

@@ -51,6 +51,36 @@ impl Default for FluxReader {
     }
 }
 
+impl FluxReader {
+    /// Decompress a `.flux` file using memory-mapped I/O.
+    ///
+    /// Instead of loading the entire file into RAM, the OS maps it into
+    /// virtual memory and pages in only the blocks that are actually read.
+    /// This is significantly faster for large files, especially with
+    /// predicate pushdown (skipped blocks are never loaded).
+    pub fn decompress_file(
+        &self,
+        path: &std::path::Path,
+        predicate: &Predicate,
+    ) -> FluxResult<RecordBatch> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| FluxError::Io(e))?;
+        // SAFETY: .flux files are immutable (versioned via transaction log).
+        // No other process modifies them while we're reading.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| FluxError::Io(e))?;
+        self.decompress(&mmap, predicate)
+    }
+
+    /// Convenience: decompress all blocks from a memory-mapped file.
+    pub fn decompress_file_all(
+        &self,
+        path: &std::path::Path,
+    ) -> FluxResult<RecordBatch> {
+        self.decompress_file(path, &Predicate::None)
+    }
+}
+
 impl LoomDecompressor for FluxReader {
     /// Decompress `data` with optional predicate pushdown.
     ///

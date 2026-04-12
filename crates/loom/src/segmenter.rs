@@ -16,6 +16,10 @@ use crate::{
 /// strategy that should be used to compress them.
 pub type Segment<'a> = (&'a [u128], LoomStrategy);
 
+/// A u64 segment: range indices + strategy. Used by the lazy-widening path
+/// to avoid allocating a full `Vec<u128>` for the entire column.
+pub type SegmentRange = (std::ops::Range<usize>, LoomStrategy);
+
 /// Run the adaptive segmenter over `values`, returning a list of segments.
 ///
 /// Each segment is a `(&[u128], LoomStrategy)` pair. The segmenter:
@@ -81,6 +85,71 @@ pub fn adaptive_segment<'a>(
 
         // 3. Emit the segment.
         segments.push((&values[pos..end], base_strategy));
+        pos = end;
+    }
+
+    segments
+}
+
+/// **Lazy-widening segmenter** — works on `&[u64]` directly.
+///
+/// Only widens small 1024-value probe windows to `u128` for classification.
+/// Returns index ranges + strategies instead of `&[u128]` slices.
+/// The caller widens each segment individually (max 64K values = 1MB) instead
+/// of the full column (potentially gigabytes).
+pub fn adaptive_segment_u64(
+    values: &[u64],
+    force_strategy: Option<LoomStrategy>,
+) -> Vec<SegmentRange> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    let mut segments: Vec<SegmentRange> = Vec::new();
+    let mut pos = 0;
+
+    while pos < values.len() {
+        let probe_end = (pos + PROBE_SIZE).min(values.len());
+
+        let base_strategy = force_strategy.unwrap_or_else(|| {
+            // Widen only the small probe window (1024 values = 16KB).
+            let probe_u128: Vec<u128> = values[pos..probe_end]
+                .iter()
+                .map(|&v| v as u128)
+                .collect();
+            classify(&probe_u128).strategy
+        });
+
+        let mut end = probe_end;
+
+        if force_strategy.is_none() {
+            let mut stride = PROBE_SIZE;
+            while end < values.len() && (end - pos) < MAX_SEGMENT_SIZE {
+                let next_end = (end + stride).min(values.len());
+                let check_end = (end + PROBE_SIZE).min(values.len());
+
+                if check_end - end < PROBE_SIZE / 4 {
+                    end = next_end;
+                    break;
+                }
+
+                // Widen only the small check window.
+                let probe_u128: Vec<u128> = values[end..check_end]
+                    .iter()
+                    .map(|&v| v as u128)
+                    .collect();
+                let next_strategy = classify(&probe_u128).strategy;
+                if next_strategy != base_strategy {
+                    break;
+                }
+                end = next_end;
+                stride = (stride * 2).min(PROBE_SIZE * 8);
+            }
+        } else {
+            end = (pos + MAX_SEGMENT_SIZE).min(values.len());
+        }
+
+        segments.push((pos..end, base_strategy));
         pos = end;
     }
 
