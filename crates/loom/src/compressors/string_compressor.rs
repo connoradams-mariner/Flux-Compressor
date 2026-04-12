@@ -37,6 +37,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 
+use crate::dtype::FluxDType;
 use crate::error::{FluxError, FluxResult};
 use crate::CompressionProfile;
 
@@ -369,11 +370,12 @@ fn decompress_raw(
 // Direct Arrow construction (zero per-string alloc)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Decompress a string block directly into an Arrow [`StringArray`].
+/// Decompress a string block directly into an Arrow [`StringArray`] or
+/// [`LargeStringArray`], depending on `dtype_tag`.
 ///
 /// Avoids the `Vec<Vec<u8>>` → `Vec<String>` → `StringArray` allocation chain
 /// by building the offset and data buffers in a single pass.
-pub fn decompress_to_arrow_string(data: &[u8]) -> FluxResult<ArrayRef> {
+pub fn decompress_to_arrow_string(data: &[u8], dtype_tag: FluxDType) -> FluxResult<ArrayRef> {
     if data.is_empty() || data[0] != TAG {
         return Err(FluxError::InvalidFile("not a String block".into()));
     }
@@ -386,13 +388,22 @@ pub fn decompress_to_arrow_string(data: &[u8]) -> FluxResult<ArrayRef> {
         return Ok(Arc::new(StringArray::from(Vec::<&str>::new())));
     }
 
-    match sub_strategy {
+    let arr = match sub_strategy {
         SUB_DICT => decompress_dict_to_arrow(&mut cur, string_count),
         SUB_RAW_LZ4 => decompress_raw_to_arrow(&mut cur, string_count, false),
         SUB_RAW_ZSTD => decompress_raw_to_arrow(&mut cur, string_count, true),
         _ => Err(FluxError::InvalidFile(format!(
             "unknown string sub_strategy: {sub_strategy:#04x}"
         ))),
+    }?;
+
+    // The internal helpers always produce StringArray (Utf8 / i32 offsets).
+    // Cast to LargeStringArray when the original column was LargeUtf8.
+    if matches!(dtype_tag, FluxDType::LargeUtf8) {
+        arrow::compute::cast(&*arr, &arrow_schema::DataType::LargeUtf8)
+            .map_err(FluxError::Arrow)
+    } else {
+        Ok(arr)
     }
 }
 

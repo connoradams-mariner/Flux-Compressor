@@ -17,10 +17,34 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import polars as pl
 
+import pyarrow as pa
+
 from fluxcompress._fluxcompress import FluxBuffer, Predicate, compress, decompress
 
 
-def compress_polars(df: "pl.DataFrame", strategy: str = "auto") -> FluxBuffer:
+def _normalize_arrow_strings(table: "pa.Table") -> "pa.Table":
+    """Normalize LargeUtf8 → Utf8 to work around Polars to_arrow() inconsistencies."""
+    needs_cast = any(
+        field.type in (pa.large_utf8(), pa.large_binary())
+        for field in table.schema
+    )
+    if not needs_cast:
+        return table
+    target = pa.schema([
+        field.with_type(pa.utf8()) if field.type == pa.large_utf8()
+        else field.with_type(pa.binary()) if field.type == pa.large_binary()
+        else field
+        for field in table.schema
+    ])
+    return table.cast(target)
+
+
+def compress_polars(
+    df: "pl.DataFrame",
+    strategy: str = "auto",
+    profile: str = "speed",
+    u64_only: bool = False,
+) -> FluxBuffer:
     """
     Compress a Polars DataFrame into a :class:`FluxBuffer`.
 
@@ -35,6 +59,12 @@ def compress_polars(df: "pl.DataFrame", strategy: str = "auto") -> FluxBuffer:
         Compression strategy override.  One of ``"auto"``, ``"rle"``,
         ``"delta"``, ``"dict"``, ``"bitslab"``, ``"lz4"``.
         ``"auto"`` (default) lets the Loom classifier decide per segment.
+    profile:
+        Compression profile.  One of ``"speed"``, ``"balanced"``,
+        ``"archive"``.  Default ``"speed"``.
+    u64_only:
+        If ``True``, skip u128 widening during compression.  Halves memory
+        bandwidth for types ≤ 64 bits.  Default ``False``.
 
     Returns
     -------
@@ -46,7 +76,7 @@ def compress_polars(df: "pl.DataFrame", strategy: str = "auto") -> FluxBuffer:
     >>> import polars as pl
     >>> import fluxcompress as fc
     >>> df = pl.DataFrame({"user_id": range(1_000_000), "revenue": range(1_000_000)})
-    >>> buf = fc.compress_polars(df)
+    >>> buf = fc.compress_polars(df, profile="archive", u64_only=True)
     >>> print(buf)
     FluxBuffer(...)
     """
@@ -59,8 +89,9 @@ def compress_polars(df: "pl.DataFrame", strategy: str = "auto") -> FluxBuffer:
         ) from None
 
     # to_arrow() uses the Arrow C Data Interface — zero-copy for numeric types.
-    arrow_table = df.to_arrow()
-    return compress(arrow_table, strategy=strategy)
+    # Normalize LargeUtf8 → Utf8 to handle Polars conversion inconsistencies.
+    arrow_table = _normalize_arrow_strings(df.to_arrow())
+    return compress(arrow_table, strategy=strategy, profile=profile, u64_only=u64_only)
 
 
 def decompress_polars(

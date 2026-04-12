@@ -124,7 +124,7 @@ impl FluxReader {
                     let mut arrays: Vec<ArrayRef> = Vec::new();
                     for &bi in &block_indices {
                         let start = footer.blocks[bi].block_offset as usize;
-                        let arr = crate::compressors::string_compressor::decompress_to_arrow_string(&data[start..])?;
+                        let arr = crate::compressors::string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?;
                         arrays.push(arr);
                     }
                     Ok((col_id, LeafData::StringArrays(arrays)))
@@ -171,7 +171,7 @@ impl FluxReader {
             // Fast path: build StringArray directly without per-string allocs.
             if candidates.len() == 1 {
                 let start = footer.blocks[candidates[0]].block_offset as usize;
-                let array = string_compressor::decompress_to_arrow_string(&data[start..])?;
+                let array = string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?;
                 let schema = Arc::new(Schema::new(vec![
                     Field::new(&self.column_name, arrow_dt, false),
                 ]));
@@ -181,7 +181,7 @@ impl FluxReader {
             let mut arrays: Vec<ArrayRef> = Vec::with_capacity(candidates.len());
             for &block_idx in candidates {
                 let start = footer.blocks[block_idx].block_offset as usize;
-                arrays.push(string_compressor::decompress_to_arrow_string(&data[start..])?);
+                arrays.push(string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?);
             }
             let refs: Vec<&dyn arrow_array::Array> = arrays.iter().map(|a| a.as_ref()).collect();
             let concat = arrow::compute::concat(&refs).map_err(FluxError::Arrow)?;
