@@ -209,6 +209,8 @@ fn pass2_repack(scan: &ScanResult) -> Result<Vec<u8>> {
             value_count: block.len() as u32,
             column_id: 0,
             crc32: 0,
+            u64_only: false,
+            dtype_tag: loom::FluxDType::UInt64,
         });
 
         pb.inc(1);

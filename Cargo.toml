@@ -52,6 +52,7 @@ pyo3        = { version = "0.21", features = ["extension-module", "abi3-py38"] }
 clap        = { version = "4", features = ["derive"] }
 polars      = { version = "0.40", features = ["lazy", "parquet", "ipc"] }
 parquet     = { version = "52", features = ["snap", "zstd", "lz4"] }
+orc-rust    = "0.4"
 
 # Error handling
 thiserror   = "1"

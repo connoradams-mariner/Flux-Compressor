@@ -21,6 +21,7 @@
 mod optimizer;
 mod inspector;
 mod bench;
+mod dtype_bench;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -100,6 +101,12 @@ enum Commands {
         #[arg(long, default_value = "sequential")]
         pattern: String,
     },
+
+    /// Multi-datatype benchmark: Flux vs Parquet vs ORC across all Arrow types.
+    DtypeBench {
+        #[arg(long, default_value_t = 1_000_000)]
+        rows: usize,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,6 +141,9 @@ fn main() -> Result<()> {
         }
         Commands::Bench { rows, pattern } => {
             bench::cmd_bench(rows, &pattern)
+        }
+        Commands::DtypeBench { rows } => {
+            dtype_bench::cmd_dtype_bench(rows)
         }
     }
 }

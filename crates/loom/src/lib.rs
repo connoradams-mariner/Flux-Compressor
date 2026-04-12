@@ -9,11 +9,36 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
-//! │                     loom API                            │
-//! │  LoomCompressor ──► BitSlab + OutlierMap + Atlas footer │
-//! │  LoomDecompressor ◄─ SIMD Unpacker + Predicate Pushdown │
+//! │  Arrow RecordBatch                                      │
+//! │       │                                                 │
+//! │  DType Router (pre-classification fast path)             │
+//! │       ├─ Boolean/Timestamp/u8/u16 → skip classifier    │
+//! │       ├─ String/Binary → string pipeline               │
+//! │       │   └─ sampled cardinality → dict or LZ4/Zstd    │
+//! │       ├─ Struct/List/Map → parallel leaf flattening     │
+//! │       │   └─ lengths-not-offsets, delta-from-base,      │
+//! │       │      constant-length fast path, key sorting     │
+//! │       └─ General numeric → Loom Classifier              │
+//! │                                                         │
+//! │  Loom Classifier (RLE/Delta/Dict/BitSlab/LZ4)           │
+//! │       │                                                 │
+//! │  Compressors + OutlierMap + Secondary Codec              │
+//! │       │                                                 │
+//! │  Atlas Footer (61B BlockMeta + ColumnDescriptor tree)    │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! ## Supported Types
+//! All Arrow types: integers (u8–u128), floats, booleans, dates, timestamps,
+//! strings, binary, structs, lists, and maps. Each type is tagged with a
+//! [`FluxDType`] byte in the footer for lossless schema reconstruction.
+//!
+//! ## Performance
+//! - **Compress**: parallel segments via rayon, parallel leaf compression
+//!   for nested types, sampled cardinality estimation for strings
+//! - **Decompress**: parallel block decompression, direct u64 reconstruction
+//!   (skips u128 intermediary), direct Arrow string construction
+//!   (zero per-string allocations), parallel nested leaf decompression
 //!
 //! ### Zero-Copy Design
 //! All hot paths operate on borrowed byte slices (`&[u8]`) or Arrow
@@ -32,10 +57,14 @@ pub mod traits;
 pub mod error;
 pub mod segmenter;
 pub mod txn;
+pub mod dtype;
+pub mod dtype_router;
 
 pub use traits::{LoomCompressor, LoomDecompressor, Predicate};
 pub use error::FluxError;
 pub use loom_classifier::{LoomStrategy, classify};
+pub use dtype::FluxDType;
+pub use dtype_router::{RouteDecision, NativeWidth};
 
 /// Format v2 magic bytes written at the end of every `.flux` file.
 /// "FLX2" in ASCII — v1 readers will reject v2 files cleanly.

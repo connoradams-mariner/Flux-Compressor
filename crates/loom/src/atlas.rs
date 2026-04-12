@@ -35,13 +35,14 @@ use std::io::{Cursor, Write};
 
 use crate::{
     FLUX_MAGIC,
+    dtype::FluxDType,
     error::{FluxError, FluxResult},
     loom_classifier::LoomStrategy,
     traits::Predicate,
 };
 
-/// Size of one serialised [`BlockMeta`] entry in bytes (v2: 60 bytes).
-pub const BLOCK_META_SIZE: usize = 60;
+/// Size of one serialised [`BlockMeta`] entry in bytes (v2: 61 bytes).
+pub const BLOCK_META_SIZE: usize = 61;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BlockMeta
@@ -66,10 +67,14 @@ pub struct BlockMeta {
     pub column_id: u16,
     /// CRC32 checksum of the compressed block data.
     pub crc32: u32,
+    /// Whether this block was compressed in u64-only mode (no u128 patching).
+    pub u64_only: bool,
+    /// Original Arrow data type tag for lossless reconstruction.
+    pub dtype_tag: FluxDType,
 }
 
 impl BlockMeta {
-    /// Serialise this entry to exactly [`BLOCK_META_SIZE`] bytes (v2: 60).
+    /// Serialise this entry to exactly [`BLOCK_META_SIZE`] bytes (v2: 61).
     pub fn to_bytes(&self) -> FluxResult<Vec<u8>> {
         let mut buf = Vec::with_capacity(BLOCK_META_SIZE);
         buf.write_u64::<LittleEndian>(self.block_offset)?;
@@ -78,15 +83,16 @@ impl BlockMeta {
         buf.write_u64::<LittleEndian>(self.z_max as u64)?;
         buf.write_u64::<LittleEndian>((self.z_max >> 64) as u64)?;
         buf.write_u64::<LittleEndian>(self.null_bitmap_offset)?;
-        buf.write_u16::<LittleEndian>(self.strategy.as_u16())?;
+        buf.write_u16::<LittleEndian>(self.strategy.encode_mask(self.u64_only))?;
         buf.write_u32::<LittleEndian>(self.value_count)?;
         buf.write_u16::<LittleEndian>(self.column_id)?;
         buf.write_u32::<LittleEndian>(self.crc32)?;
+        buf.write_u8(self.dtype_tag.as_u8())?;
         debug_assert_eq!(buf.len(), BLOCK_META_SIZE);
         Ok(buf)
     }
 
-    /// Deserialise from a 50-byte slice.
+    /// Deserialise from a [`BLOCK_META_SIZE`]-byte slice.
     pub fn from_bytes(data: &[u8]) -> FluxResult<Self> {
         if data.len() < BLOCK_META_SIZE {
             return Err(FluxError::InvalidFile(format!(
@@ -104,12 +110,15 @@ impl BlockMeta {
         let null_bitmap_offset = cur.read_u64::<LittleEndian>()?;
         let strategy_raw = cur.read_u16::<LittleEndian>()?;
 
+        let u64_only = LoomStrategy::is_u64_only(strategy_raw);
         let strategy = LoomStrategy::from_u16(strategy_raw).ok_or_else(|| {
             FluxError::InvalidFile(format!("unknown strategy mask: {strategy_raw:#06x}"))
         })?;
         let value_count = cur.read_u32::<LittleEndian>()?;
         let column_id = cur.read_u16::<LittleEndian>()?;
         let crc32 = cur.read_u32::<LittleEndian>()?;
+        let dtype_tag_raw = cur.read_u8()?;
+        let dtype_tag = FluxDType::from_u8(dtype_tag_raw).unwrap_or(FluxDType::UInt64);
 
         Ok(Self {
             block_offset,
@@ -120,6 +129,8 @@ impl BlockMeta {
             value_count,
             column_id,
             crc32,
+            u64_only,
+            dtype_tag,
         })
     }
 
@@ -134,11 +145,29 @@ impl BlockMeta {
 // AtlasFooter
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Descriptor for a column in the schema tree. Leaf columns have empty
+/// `children` and a valid `column_id` that maps to `BlockMeta.column_id`.
+/// Container columns (Struct/List/Map) have children but no blocks of their own.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ColumnDescriptor {
+    /// Column name (from the Arrow schema).
+    pub name: String,
+    /// Compact dtype tag.
+    pub dtype_tag: u8,
+    /// Child descriptors (empty for leaf columns).
+    pub children: Vec<ColumnDescriptor>,
+    /// Leaf column ID mapping to `BlockMeta.column_id`. `u16::MAX` for containers.
+    pub column_id: u16,
+}
+
 /// The complete Atlas footer: a list of [`BlockMeta`] entries plus a trailer.
 #[derive(Debug, Default, Clone)]
 pub struct AtlasFooter {
     /// Metadata for each compressed block, in file order.
     pub blocks: Vec<BlockMeta>,
+    /// Optional schema tree for nested type reconstruction.
+    /// Empty for flat (non-nested) schemas.
+    pub schema: Vec<ColumnDescriptor>,
 }
 
 impl AtlasFooter {
@@ -154,18 +183,32 @@ impl AtlasFooter {
 
     /// Serialise the footer to bytes.
     ///
-    /// Layout: `[BlockMeta × N][u32: block_count][u32: footer_length][u32: MAGIC]`
+    /// Layout: `[BlockMeta × N][schema_json (if non-empty)][u32: schema_len][u32: block_count][u32: footer_length][u32: MAGIC]`
     pub fn to_bytes(&self) -> FluxResult<Vec<u8>> {
         let block_count = self.blocks.len() as u32;
-        // footer_length = block_section + 4 (count) + 4 (length field) + 4 (magic)
         let block_section_len = block_count as usize * BLOCK_META_SIZE;
-        let footer_length = (block_section_len + 12) as u32;
+
+        // Serialize schema tree as JSON (empty string if no nested types).
+        let schema_json = if self.schema.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&self.schema)
+                .map_err(|e| FluxError::Internal(format!("schema serialize: {e}")))?
+        };
+        let schema_len = schema_json.len() as u32;
+
+        // footer_length = blocks + schema + 4(schema_len) + 4(count) + 4(length) + 4(magic)
+        let footer_length = (block_section_len + schema_json.len() + 16) as u32;
 
         let mut buf = Vec::with_capacity(footer_length as usize);
 
         for meta in &self.blocks {
             buf.extend(meta.to_bytes()?);
         }
+        if !schema_json.is_empty() {
+            buf.extend_from_slice(&schema_json);
+        }
+        buf.write_u32::<LittleEndian>(schema_len)?;
         buf.write_u32::<LittleEndian>(block_count)?;
         buf.write_u32::<LittleEndian>(footer_length)?;
         buf.write_u32::<LittleEndian>(FLUX_MAGIC)?;
@@ -178,7 +221,7 @@ impl AtlasFooter {
     /// The last 4 bytes must be `FLUX_MAGIC`.
     /// The preceding 4 bytes are `footer_length`.
     pub fn from_file_tail(data: &[u8]) -> FluxResult<Self> {
-        if data.len() < 12 {
+        if data.len() < 16 {
             return Err(FluxError::InvalidFile("file too small for flux footer".into()));
         }
 
@@ -203,18 +246,19 @@ impl AtlasFooter {
         let footer_start = data.len() - footer_length;
         let footer_data = &data[footer_start..];
 
-        // Read block count.
+        // Read block count (4 bytes before footer_length).
         let count_off = footer_data.len() - 12;
         let block_count =
             u32::from_le_bytes(footer_data[count_off..count_off + 4].try_into().unwrap())
                 as usize;
 
-        let expected_len = block_count * BLOCK_META_SIZE + 12;
-        if footer_data.len() < expected_len {
-            return Err(FluxError::InvalidFile(
-                "footer data truncated".into(),
-            ));
-        }
+        // Read schema length (4 bytes before block_count).
+        let schema_len_off = footer_data.len() - 16;
+        let schema_len =
+            u32::from_le_bytes(footer_data[schema_len_off..schema_len_off + 4].try_into().unwrap())
+                as usize;
+
+        let block_section_len = block_count * BLOCK_META_SIZE;
 
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
@@ -222,7 +266,17 @@ impl AtlasFooter {
             blocks.push(BlockMeta::from_bytes(&footer_data[off..off + BLOCK_META_SIZE])?);
         }
 
-        Ok(Self { blocks })
+        // Parse schema JSON if present.
+        let schema = if schema_len > 0 {
+            let schema_start = block_section_len;
+            let schema_end = schema_start + schema_len;
+            serde_json::from_slice(&footer_data[schema_start..schema_end])
+                .map_err(|e| FluxError::Internal(format!("schema deserialize: {e}")))?  
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self { blocks, schema })
     }
 
     /// Filter blocks to those that *may* satisfy `predicate`.
@@ -285,6 +339,8 @@ mod tests {
             value_count: 1024,
             column_id: 0,
             crc32: 0,
+            u64_only: false,
+            dtype_tag: FluxDType::UInt64,
         }
     }
 

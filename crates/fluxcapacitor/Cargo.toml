@@ -19,6 +19,7 @@ arrow        = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 parquet      = { workspace = true }
+orc-rust     = { workspace = true }
 anyhow       = { workspace = true }
 tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }

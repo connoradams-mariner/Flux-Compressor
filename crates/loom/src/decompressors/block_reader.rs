@@ -16,6 +16,7 @@ use crate::{
         delta_compressor,
         dict_compressor,
         lz4_compressor,
+        string_compressor,
     },
 };
 
@@ -79,10 +80,26 @@ fn decompress_inner(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
         dict_compressor::TAG       => dict_compressor::decompress(data),
         bit_slab_compressor::TAG   => bit_slab_compressor::decompress(data),
         lz4_compressor::TAG        => lz4_compressor::decompress(data),
+        // String blocks are handled separately (they return Vec<Vec<u8>>,
+        // not Vec<u128>). This tag should not reach decompress_inner.
+        string_compressor::TAG     => Err(FluxError::InvalidFile(
+            "string block (TAG 0x06) must be decompressed via string_compressor::decompress".into(),
+        )),
         unknown => Err(FluxError::InvalidFile(format!(
             "unknown block tag: {unknown:#04x}"
         ))),
     }
+}
+
+/// Decompress a block and truncate results to `u64`.
+///
+/// Calls [`decompress_block`] then maps `u128 as u64`, avoiding a separate
+/// `Vec<u64>` collect in the caller. The truncation is safe for all types
+/// ≤ 64 bits (the common case).
+pub fn decompress_block_to_u64(data: &[u8]) -> FluxResult<(Vec<u64>, usize)> {
+    let (values_u128, consumed) = decompress_block(data)?;
+    let values_u64: Vec<u64> = values_u128.into_iter().map(|v| v as u64).collect();
+    Ok((values_u64, consumed))
 }
 
 #[cfg(test)]

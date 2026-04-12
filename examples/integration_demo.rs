@@ -333,6 +333,8 @@ fn demo_cold_optimizer() {
             value_count: seg.len() as u32,
             column_id: 0,
             crc32: 0,
+            u64_only: false,
+            dtype_tag: loom::FluxDType::UInt64,
         });
         cold_bytes.extend_from_slice(&block);
     }

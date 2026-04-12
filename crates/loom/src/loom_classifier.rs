@@ -31,10 +31,15 @@ pub enum LoomStrategy {
     SimdLz4     = 0x0005,
 }
 
+/// Bit flag in the strategy_mask u16 indicating u64-only mode.
+/// When set, the block contains no u128 values and the decompressor
+/// can decode directly into `Vec<u64>` without u128 intermediary.
+pub const U64_ONLY_FLAG: u16 = 0x0100; // bit 8
+
 impl LoomStrategy {
-    /// Decode a strategy from its 2-byte strategy mask.
+    /// Decode a strategy from its 2-byte strategy mask (low byte only).
     pub fn from_u16(v: u16) -> Option<Self> {
-        match v {
+        match v & 0x00FF {
             0x0001 => Some(Self::Rle),
             0x0002 => Some(Self::DeltaDelta),
             0x0003 => Some(Self::Dictionary),
@@ -47,6 +52,17 @@ impl LoomStrategy {
     /// Return the 2-byte strategy mask for the Atlas footer.
     pub fn as_u16(self) -> u16 {
         self as u16
+    }
+
+    /// Encode strategy + u64_only flag into the strategy_mask.
+    pub fn encode_mask(self, u64_only: bool) -> u16 {
+        let base = self as u16;
+        if u64_only { base | U64_ONLY_FLAG } else { base }
+    }
+
+    /// Check if the u64_only flag is set in a strategy mask.
+    pub fn is_u64_only(mask: u16) -> bool {
+        mask & U64_ONLY_FLAG != 0
     }
 }
 
