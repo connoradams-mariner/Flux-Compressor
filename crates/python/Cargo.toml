@@ -21,6 +21,7 @@ arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 byteorder    = { workspace = true }
 thiserror    = { workspace = true }
+serde_json   = { workspace = true }
 
 [features]
 default      = ["simd-avx2"]

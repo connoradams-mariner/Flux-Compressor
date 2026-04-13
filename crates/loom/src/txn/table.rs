@@ -127,6 +127,7 @@ impl FluxTable {
             operation: if version == 0 { Operation::Create } else { Operation::Append },
             data_files_added: vec![relative],
             data_files_removed: vec![],
+            file_manifests: vec![],
             row_count_delta: row_count,
             metadata: Default::default(),
         };

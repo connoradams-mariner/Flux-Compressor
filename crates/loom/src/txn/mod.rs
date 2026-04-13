@@ -21,7 +21,13 @@
 mod log_entry;
 mod snapshot;
 mod table;
+pub mod partition;
+pub mod optimizer;
 
 pub use log_entry::{LogEntry, Operation};
 pub use snapshot::Snapshot;
 pub use table::FluxTable;
+pub use partition::{
+    PartitionTransform, PartitionField, PartitionSpec,
+    ColumnStats, FileManifest, TableMeta,
+};

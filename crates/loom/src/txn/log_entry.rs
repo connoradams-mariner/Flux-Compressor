@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::partition::FileManifest;
+
 /// The type of operation recorded in a log entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,9 +36,14 @@ pub struct LogEntry {
     /// The type of operation.
     pub operation: Operation,
     /// Data files added by this transaction (relative to table root).
+    /// Simple path strings for backward compatibility.
     pub data_files_added: Vec<String>,
     /// Data files removed by this transaction (tombstoned).
     pub data_files_removed: Vec<String>,
+    /// Rich file manifests with partition values and column stats.
+    /// When present, these supersede `data_files_added` for metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_manifests: Vec<FileManifest>,
     /// Net row count change (positive for appends, negative for deletes).
     pub row_count_delta: i64,
     /// Arbitrary user-supplied metadata (e.g., job ID, user name).
@@ -73,6 +80,7 @@ mod tests {
             operation: Operation::Append,
             data_files_added: vec!["data/part-0001.flux".into()],
             data_files_removed: vec![],
+            file_manifests: vec![],
             row_count_delta: 100_000,
             metadata: [("user".into(), "spark-job-42".into())]
                 .into_iter()

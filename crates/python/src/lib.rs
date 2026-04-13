@@ -29,7 +29,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::{PyValueError, PyRuntimeError, PyTypeError};
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
 use std::sync::Arc;
 
@@ -310,6 +310,124 @@ impl PyFluxBuffer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PyFluxBatchReader — streaming batch reader for Python
+// ─────────────────────────────────────────────────────────────────────────────
+
+use loom::decompressors::flux_reader::FluxBatchIterator;
+
+/// Streaming batch reader over one or more ``.flux`` files.
+///
+/// Yields one ``pyarrow.RecordBatch`` per file.  Only one file is
+/// memory-mapped at a time, keeping peak memory bounded.
+///
+/// Example:
+///
+/// ```python
+/// reader = fc.FluxBatchReader(["part-0.flux", "part-1.flux"], columns=["id"])
+/// for batch in reader:
+///     print(batch.num_rows)
+/// ```
+#[pyclass(name = "FluxBatchReader", module = "fluxcompress")]
+pub struct PyFluxBatchReader {
+    inner: std::cell::RefCell<FluxBatchIterator>,
+    py_schema: PyObject,
+}
+
+#[pymethods]
+impl PyFluxBatchReader {
+    /// Create a batch reader over the given ``.flux`` file paths.
+    ///
+    /// Args:
+    ///     paths:     List of ``.flux`` file paths.
+    ///     columns:   Optional column projection (only these columns are decompressed).
+    ///     predicate: Optional ``Predicate`` for block-level pushdown.
+    #[new]
+    #[pyo3(signature = (paths, columns=None, predicate=None))]
+    fn new(
+        py: Python<'_>,
+        paths: Vec<String>,
+        columns: Option<Vec<String>>,
+        predicate: Option<&PyPredicate>,
+    ) -> PyResult<Self> {
+        use arrow::pyarrow::ToPyArrow;
+
+        let path_bufs: Vec<std::path::PathBuf> = paths.iter()
+            .map(|s| std::path::PathBuf::from(s))
+            .collect();
+        let pred = predicate
+            .map(|p| p.inner.clone())
+            .unwrap_or(Predicate::None);
+
+        let iter = FluxBatchIterator::new(path_bufs, columns, pred)
+            .map_err(flux_err)?;
+
+        let py_schema = iter.schema().to_pyarrow(py)
+            .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))?;
+
+        Ok(Self {
+            inner: std::cell::RefCell::new(iter),
+            py_schema,
+        })
+    }
+
+    /// The Arrow schema of batches produced by this reader.
+    #[getter]
+    fn schema(&self, py: Python<'_>) -> PyObject {
+        self.py_schema.clone_ref(py)
+    }
+
+    /// Number of files remaining.
+    #[getter]
+    fn remaining(&self) -> usize {
+        self.inner.borrow().remaining()
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let batch_opt = self.inner.borrow_mut().next();
+        match batch_opt {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let py_batch = record_batch_to_pyarrow(py, &batch)?;
+                Ok(Some(py_batch))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Convert to a ``pyarrow.RecordBatchReader``.
+    ///
+    /// The returned reader lazily pulls batches from this iterator.
+    fn to_reader(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let pa = py.import("pyarrow")?;
+        let reader_cls = pa.getattr("RecordBatchReader")?;
+        let reader = reader_cls.call_method1(
+            "from_batches",
+            (&self.py_schema, self.as_batch_list(py)?),
+        )?;
+        Ok(reader.into())
+    }
+
+    /// Collect all remaining batches as a list of pyarrow.RecordBatch.
+    fn as_batch_list(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let mut batches = Vec::new();
+        loop {
+            let batch_opt = self.inner.borrow_mut().next();
+            match batch_opt {
+                None => break,
+                Some(Ok(batch)) => batches.push(record_batch_to_pyarrow(py, &batch)?),
+                Some(Err(e)) => return Err(PyRuntimeError::new_err(e.to_string())),
+            }
+        }
+        let list = pyo3::types::PyList::new(py, &batches);
+        Ok(list.into())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Module-level functions
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -464,12 +582,135 @@ fn read_flux(path: &str) -> PyResult<PyFluxBuffer> {
     PyFluxBuffer::load(path)
 }
 
+/// Decompress a ``.flux`` file directly from disk using memory-mapped I/O.
+///
+/// This is more memory-efficient than ``read_flux()`` + ``decompress()``
+/// because the compressed bytes are never loaded into Python memory — the OS
+/// maps the file into virtual memory and only pages in the blocks that are
+/// actually decompressed.
+///
+/// Args:
+///     path:       Path to a ``.flux`` file.
+///     predicate:  Optional ``Predicate`` for pushdown filtering.
+///     columns:    Optional list of column names for projection.
+///                 Only these columns will be decompressed.
+///
+/// Returns:
+///     ``pyarrow.Table``
+#[pyfunction]
+#[pyo3(signature = (path, predicate=None, columns=None))]
+fn decompress_file(
+    py: Python<'_>,
+    path: &str,
+    predicate: Option<&PyPredicate>,
+    columns: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let pred = predicate
+        .map(|p| p.inner.clone())
+        .unwrap_or(Predicate::None);
+
+    let reader = FluxReader::default();
+    let file_path = std::path::Path::new(path);
+
+    let batch = match columns {
+        Some(cols) => reader.decompress_file_projected(file_path, &pred, &cols).map_err(flux_err)?,
+        None => reader.decompress_file(file_path, &pred).map_err(flux_err)?,
+    };
+
+    record_batch_to_pyarrow(py, &batch)
+}
+
+/// Read the Arrow schema from a ``.flux`` file without decompressing any data.
+///
+/// Args:
+///     path: Path to a ``.flux`` file.
+///
+/// Returns:
+///     ``pyarrow.Schema``
+#[pyfunction]
+fn read_flux_schema(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    use arrow::pyarrow::ToPyArrow;
+    let schema = FluxReader::read_schema_from_file(std::path::Path::new(path))
+        .map_err(flux_err)?;
+    schema.to_pyarrow(py)
+        .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))
+}
+
 /// Write a ``FluxBuffer`` to a ``.flux`` file on disk.
 ///
 /// Equivalent to ``buf.save(path)``.
 #[pyfunction]
 fn write_flux(buf: PyRef<PyFluxBuffer>, path: &str) -> PyResult<()> {
     buf.save(path)
+}
+
+/// Merge multiple ``FluxBuffer`` objects into a single buffer.
+///
+/// This is used by chunked compression: each chunk is compressed
+/// independently, then the block bytes and footer metadata are
+/// stitched together into one valid ``.flux`` buffer.
+///
+/// Args:
+///     buffers: A list of ``FluxBuffer`` objects to merge.
+///
+/// Returns:
+///     A single ``FluxBuffer`` containing all blocks from all inputs.
+#[pyfunction]
+fn merge_flux_buffers(buffers: Vec<PyRef<PyFluxBuffer>>) -> PyResult<PyFluxBuffer> {
+    if buffers.is_empty() {
+        return Err(PyValueError::new_err("no buffers to merge"));
+    }
+    if buffers.len() == 1 {
+        return Ok(PyFluxBuffer { data: buffers[0].data.clone() });
+    }
+
+    // Parse each footer, collect block bytes and metadata.
+    let mut all_block_bytes: Vec<u8> = Vec::new();
+    let mut merged_footer = AtlasFooter::new();
+    let mut schema_set = false;
+
+    for buf_ref in &buffers {
+        let footer = AtlasFooter::from_file_tail(&buf_ref.data).map_err(flux_err)?;
+
+        // Use the schema from the first buffer (all chunks share the same schema).
+        if !schema_set && !footer.schema.is_empty() {
+            merged_footer.schema = footer.schema.clone();
+            schema_set = true;
+        }
+
+        for meta in &footer.blocks {
+            let block_start = meta.block_offset as usize;
+            // Determine block end: next block's offset, or start of footer.
+            let block_end = footer.blocks.iter()
+                .map(|m| m.block_offset as usize)
+                .filter(|&o| o > block_start)
+                .min()
+                .unwrap_or_else(|| {
+                    // Last block: ends where footer begins.
+                    // footer_length is the last 12 bytes: schema_len + block_count + footer_length + magic
+                    let data_len = buf_ref.data.len();
+                    let footer_bytes = footer.blocks.len() * loom::atlas::BLOCK_META_SIZE
+                        + 4 + 4 + 4; // block_count + footer_length + magic
+                    let schema_json_len: usize = if footer.schema.is_empty() { 0 } else {
+                        // schema_json + schema_len(u32)
+                        serde_json::to_vec(&footer.schema).map(|v| v.len() + 4).unwrap_or(4)
+                    };
+                    data_len - footer_bytes - schema_json_len
+                });
+
+            let mut adjusted_meta = meta.clone();
+            adjusted_meta.block_offset = all_block_bytes.len() as u64;
+            all_block_bytes.extend_from_slice(&buf_ref.data[block_start..block_end]);
+            merged_footer.push(adjusted_meta);
+        }
+    }
+
+    let footer_bytes = merged_footer.to_bytes().map_err(flux_err)?;
+    let mut output = Vec::with_capacity(all_block_bytes.len() + footer_bytes.len());
+    output.extend_from_slice(&all_block_bytes);
+    output.extend_from_slice(&footer_bytes);
+
+    Ok(PyFluxBuffer { data: output })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -480,6 +721,9 @@ fn write_flux(buf: PyRef<PyFluxBuffer>, path: &str) -> PyResult<()> {
 ///
 /// Supports: pyarrow.Table, pyarrow.RecordBatch, polars.DataFrame (via
 /// __arrow_c_stream__).
+///
+/// Handles `LargeUtf8`/`LargeBinary` normalization on the Rust side so the
+/// Python caller does not need to copy the table for type casting.
 fn pyarrow_to_record_batch(py: Python<'_>, obj: &PyAny) -> PyResult<RecordBatch> {
     use arrow::pyarrow::FromPyArrow;
 
@@ -500,9 +744,54 @@ fn pyarrow_to_record_batch(py: Python<'_>, obj: &PyAny) -> PyResult<RecordBatch>
     };
 
     // Arrow C Data Interface: zero-copy FFI from PyArrow → Rust Arrow.
-    // This avoids the IPC serialization round-trip entirely.
-    RecordBatch::from_pyarrow_bound(&batch_obj.as_borrowed())
-        .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))
+    let batch = RecordBatch::from_pyarrow_bound(&batch_obj.as_borrowed())
+        .map_err(|e| PyRuntimeError::new_err(format!("Arrow FFI: {e}")))?;
+
+    // Normalize LargeUtf8 → Utf8 and LargeBinary → Binary in-place.
+    // Polars to_arrow() can produce inconsistent schema/column type combos;
+    // fixing it here avoids a full Python-side table.cast() copy.
+    normalize_large_string_columns(batch)
+        .map_err(|e| PyRuntimeError::new_err(format!("schema normalization: {e}")))
+}
+
+/// Cast any `LargeUtf8` / `LargeBinary` columns down to `Utf8` / `Binary`.
+/// Columns that don't need casting are returned as-is (zero-copy).
+fn normalize_large_string_columns(batch: RecordBatch) -> Result<RecordBatch, arrow::error::ArrowError> {
+    use arrow_schema::DataType;
+
+    let schema = batch.schema();
+    let needs_cast = schema.fields().iter().any(|f| {
+        matches!(f.data_type(), DataType::LargeUtf8 | DataType::LargeBinary)
+    });
+    if !needs_cast {
+        return Ok(batch);
+    }
+
+    let mut new_fields = Vec::with_capacity(schema.fields().len());
+    let mut new_columns: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+
+    for (i, field) in schema.fields().iter().enumerate() {
+        let col = batch.column(i);
+        match field.data_type() {
+            DataType::LargeUtf8 => {
+                let cast_col = arrow::compute::cast(col, &DataType::Utf8)?;
+                new_fields.push(Arc::new(field.as_ref().clone().with_data_type(DataType::Utf8)));
+                new_columns.push(cast_col);
+            }
+            DataType::LargeBinary => {
+                let cast_col = arrow::compute::cast(col, &DataType::Binary)?;
+                new_fields.push(Arc::new(field.as_ref().clone().with_data_type(DataType::Binary)));
+                new_columns.push(cast_col);
+            }
+            _ => {
+                new_fields.push(Arc::new(schema.field(i).clone()));
+                new_columns.push(Arc::clone(col));
+            }
+        }
+    }
+
+    let new_schema = Arc::new(Schema::new(new_fields));
+    RecordBatch::try_new(new_schema, new_columns)
 }
 
 /// Convert a Rust RecordBatch to a PyArrow Table via Arrow C Data Interface (zero-copy).
@@ -587,6 +876,7 @@ fn _fluxcompress(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyBlockInfo>()?;
     m.add_class::<PyFileInfo>()?;
     m.add_class::<PyFluxBuffer>()?;
+    m.add_class::<PyFluxBatchReader>()?;
 
     // Functions
     m.add_function(wrap_pyfunction!(compress, m)?)?;
@@ -595,6 +885,9 @@ fn _fluxcompress(py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(col, m)?)?;
     m.add_function(wrap_pyfunction!(read_flux, m)?)?;
     m.add_function(wrap_pyfunction!(write_flux, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_flux_buffers, m)?)?;
+    m.add_function(wrap_pyfunction!(decompress_file, m)?)?;
+    m.add_function(wrap_pyfunction!(read_flux_schema, m)?)?;
 
     // Version constant
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

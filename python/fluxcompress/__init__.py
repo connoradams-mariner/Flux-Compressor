@@ -58,13 +58,17 @@ from fluxcompress._fluxcompress import (  # noqa: F401
     BlockInfo,
     FileInfo,
     FluxBuffer,
+    FluxBatchReader,
     # Core functions
     compress,
     decompress,
+    decompress_file,
     inspect,
     col,
     read_flux,
+    read_flux_schema,
     write_flux,
+    merge_flux_buffers,
     # Version
     __version__,
 )
@@ -72,6 +76,9 @@ from fluxcompress._fluxcompress import (  # noqa: F401
 from fluxcompress._polars import (  # noqa: F401
     compress_polars,
     decompress_polars,
+    scan_flux,
+    write_flux_table,
+    optimize,
 )
 
 # pandas helpers are imported lazily in fluxcompress.pandas to avoid a hard
@@ -94,9 +101,15 @@ __all__ = [
     "col",
     "read_flux",
     "write_flux",
+    "merge_flux_buffers",
     # Polars helpers
     "compress_polars",
     "decompress_polars",
+    "scan_flux",
+    "write_flux_table",
+    "optimize",
+    # Batch reader
+    "FluxBatchReader",
     # Submodules
     "pandas",
     # Version

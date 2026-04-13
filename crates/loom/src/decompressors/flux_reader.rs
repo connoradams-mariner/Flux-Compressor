@@ -25,7 +25,8 @@ use arrow_array::{
     StringArray, BinaryArray,
     StructArray, ListArray,
 };
-use arrow_schema::{DataType, Field, Fields, Schema};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::{
@@ -89,6 +90,76 @@ impl FluxReader {
     ) -> FluxResult<RecordBatch> {
         self.decompress_file(path, &Predicate::None)
     }
+
+    /// Decompress with column projection — only decompress the named columns.
+    ///
+    /// Blocks belonging to columns not in `projection` are skipped entirely,
+    /// saving both I/O and CPU.  The output `RecordBatch` contains only the
+    /// projected columns, in the order they appear in the schema.
+    pub fn decompress_projected(
+        &self,
+        data: &[u8],
+        predicate: &Predicate,
+        projection: &[String],
+    ) -> FluxResult<RecordBatch> {
+        let footer = AtlasFooter::from_file_tail(data)?;
+
+        if footer.blocks.is_empty() {
+            return empty_batch(&self.column_name);
+        }
+
+        if footer.schema.is_empty() {
+            // Flat (single-column) file — projection doesn't apply.
+            return self.decompress(data, predicate);
+        }
+
+        // Build the set of projected column names.
+        let proj_set: HashSet<&str> = projection.iter().map(|s| s.as_str()).collect();
+
+        // Filter schema descriptors to only projected columns.
+        let projected_schema: Vec<&ColumnDescriptor> = footer.schema.iter()
+            .filter(|desc| proj_set.contains(desc.name.as_str()))
+            .collect();
+
+        if projected_schema.is_empty() {
+            return empty_batch(&self.column_name);
+        }
+
+        // Collect projected column_ids (including nested children).
+        let mut projected_col_ids: HashSet<u16> = HashSet::new();
+        for desc in &projected_schema {
+            collect_column_ids(desc, &mut projected_col_ids);
+        }
+
+        self.decompress_with_schema_projected(data, &footer, &projected_schema, &projected_col_ids)
+    }
+
+    /// Decompress a `.flux` file with column projection via mmap.
+    pub fn decompress_file_projected(
+        &self,
+        path: &std::path::Path,
+        predicate: &Predicate,
+        projection: &[String],
+    ) -> FluxResult<RecordBatch> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| FluxError::Io(e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| FluxError::Io(e))?;
+        self.decompress_projected(&mmap, predicate, projection)
+    }
+
+    /// Read just the Arrow schema from a `.flux` file without decompressing data.
+    pub fn read_schema(data: &[u8]) -> FluxResult<SchemaRef> {
+        let footer = AtlasFooter::from_file_tail(data)?;
+        Ok(Arc::new(schema_from_footer(&footer)))
+    }
+
+    /// Read schema from a `.flux` file path.
+    pub fn read_schema_from_file(path: &std::path::Path) -> FluxResult<SchemaRef> {
+        let file = std::fs::File::open(path).map_err(FluxError::Io)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(FluxError::Io)?;
+        Self::read_schema(&mmap)
+    }
 }
 
 impl FluxReader {
@@ -101,14 +172,37 @@ impl FluxReader {
         data: &[u8],
         footer: &AtlasFooter,
     ) -> FluxResult<RecordBatch> {
+        let all_descs: Vec<&ColumnDescriptor> = footer.schema.iter().collect();
+        let mut all_col_ids: HashSet<u16> = HashSet::new();
+        for desc in &footer.schema {
+            collect_column_ids(desc, &mut all_col_ids);
+        }
+        self.decompress_with_schema_projected(data, footer, &all_descs, &all_col_ids)
+    }
+
+    /// Core schema-based decompression with column projection.
+    ///
+    /// Only decompresses leaf blocks whose `column_id` is in `projected_col_ids`.
+    /// Only reassembles columns in `projected_descs`.
+    fn decompress_with_schema_projected(
+        &self,
+        data: &[u8],
+        footer: &AtlasFooter,
+        projected_descs: &[&ColumnDescriptor],
+        projected_col_ids: &HashSet<u16>,
+    ) -> FluxResult<RecordBatch> {
         use rayon::prelude::*;
         use std::collections::HashMap;
 
-        // Phase 1: Collect all leaf column IDs and their block indices.
+        // Phase 1: Collect leaf blocks, filtered by projected column_ids.
         let mut leaf_blocks: Vec<(u16, Vec<usize>)> = Vec::new();
-        collect_leaf_blocks(&footer.schema, footer, &mut leaf_blocks);
+        for &desc in projected_descs {
+            collect_leaf_blocks_filtered(
+                std::slice::from_ref(desc), footer, projected_col_ids, &mut leaf_blocks,
+            );
+        }
 
-        // Phase 2: Parallel decompression of all leaves.
+        // Phase 2: Parallel decompression of projected leaves only.
         let decompressed: HashMap<u16, LeafData> = leaf_blocks
             .into_par_iter()
             .map(|(col_id, block_indices)| {
@@ -120,7 +214,6 @@ impl FluxReader {
                 );
 
                 if is_string {
-                    // Collect string arrays from each block.
                     let mut arrays: Vec<ArrayRef> = Vec::new();
                     for &bi in &block_indices {
                         let start = footer.blocks[bi].block_offset as usize;
@@ -129,7 +222,6 @@ impl FluxReader {
                     }
                     Ok((col_id, LeafData::StringArrays(arrays)))
                 } else {
-                    // Numeric: decompress to u64.
                     let mut all_values: Vec<u64> = Vec::new();
                     for &bi in &block_indices {
                         let start = footer.blocks[bi].block_offset as usize;
@@ -141,11 +233,11 @@ impl FluxReader {
             })
             .collect::<FluxResult<HashMap<u16, LeafData>>>()?;
 
-        // Phase 3: Tree reassembly (single-threaded, just pointer chasing).
+        // Phase 3: Tree reassembly for projected columns only.
         let mut columns: Vec<ArrayRef> = Vec::new();
         let mut fields: Vec<Field> = Vec::new();
 
-        for desc in &footer.schema {
+        for &desc in projected_descs {
             let (array, field) = reassemble_column_fast(footer, desc, &decompressed)?;
             columns.push(array);
             fields.push(field);
@@ -284,6 +376,109 @@ impl LoomDecompressor for FluxReader {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FluxBatchIterator — streaming file-level decompression
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A streaming iterator that yields one [`RecordBatch`] per `.flux` file.
+///
+/// Only one file is memory-mapped at a time — previous files are unmapped
+/// before the next is opened, keeping memory usage bounded.
+///
+/// Supports column projection and predicate pushdown.
+pub struct FluxBatchIterator {
+    /// File paths to iterate over.
+    paths: Vec<std::path::PathBuf>,
+    /// Current file index.
+    current: usize,
+    /// Optional column projection (decompress only these columns).
+    projection: Option<Vec<String>>,
+    /// Predicate for block-level pushdown.
+    predicate: Predicate,
+    /// Arrow schema (read from first file, projected if applicable).
+    schema: SchemaRef,
+}
+
+impl FluxBatchIterator {
+    /// Create a new batch iterator over the given `.flux` file paths.
+    ///
+    /// Reads the schema from the first file.  If `projection` is provided,
+    /// the schema is filtered to only the projected columns.
+    pub fn new(
+        paths: Vec<std::path::PathBuf>,
+        projection: Option<Vec<String>>,
+        predicate: Predicate,
+    ) -> FluxResult<Self> {
+        if paths.is_empty() {
+            return Err(FluxError::InvalidFile("no files to iterate".into()));
+        }
+
+        // Read schema from the first file.
+        let full_schema = FluxReader::read_schema_from_file(&paths[0])?;
+
+        let schema = match &projection {
+            Some(cols) => {
+                let proj_set: HashSet<&str> = cols.iter().map(|s| s.as_str()).collect();
+                let projected_fields: Vec<Arc<Field>> = full_schema.fields().iter()
+                    .filter(|f| proj_set.contains(f.name().as_str()))
+                    .cloned()
+                    .collect();
+                if projected_fields.is_empty() {
+                    full_schema
+                } else {
+                    Arc::new(Schema::new(projected_fields))
+                }
+            }
+            None => full_schema,
+        };
+
+        Ok(Self {
+            paths,
+            current: 0,
+            projection,
+            predicate,
+            schema,
+        })
+    }
+
+    /// The Arrow schema for batches produced by this iterator.
+    pub fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
+    /// Number of files remaining (including current).
+    pub fn remaining(&self) -> usize {
+        self.paths.len().saturating_sub(self.current)
+    }
+}
+
+impl Iterator for FluxBatchIterator {
+    type Item = Result<RecordBatch, arrow_schema::ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.paths.len() {
+            return None;
+        }
+
+        let path = &self.paths[self.current];
+        self.current += 1;
+
+        let reader = FluxReader::default();
+        let result = match &self.projection {
+            Some(cols) => reader.decompress_file_projected(path, &self.predicate, cols),
+            None => reader.decompress_file(path, &self.predicate),
+        };
+
+        Some(result.map_err(|e| arrow_schema::ArrowError::ExternalError(Box::new(e))))
+    }
+}
+
+impl arrow_array::RecordBatchReader for FluxBatchIterator {
+    fn schema(&self) -> SchemaRef {
+        self.schema()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -313,14 +508,28 @@ fn collect_leaf_blocks(
     footer: &AtlasFooter,
     out: &mut Vec<(u16, Vec<usize>)>,
 ) {
+    let all_ids: HashSet<u16> = footer.blocks.iter().map(|b| b.column_id).collect();
+    collect_leaf_blocks_filtered(descriptors, footer, &all_ids, out);
+}
+
+/// Collect leaf blocks, but only for column_ids in `allowed_ids`.
+fn collect_leaf_blocks_filtered(
+    descriptors: &[ColumnDescriptor],
+    footer: &AtlasFooter,
+    allowed_ids: &HashSet<u16>,
+    out: &mut Vec<(u16, Vec<usize>)>,
+) {
     for desc in descriptors {
         let dtype_tag = FluxDType::from_u8(desc.dtype_tag).unwrap_or(FluxDType::UInt64);
         match dtype_tag {
             FluxDType::StructContainer | FluxDType::ListContainer | FluxDType::MapContainer => {
-                collect_leaf_blocks(&desc.children, footer, out);
+                collect_leaf_blocks_filtered(&desc.children, footer, allowed_ids, out);
             }
             _ => {
                 let col_id = desc.column_id;
+                if !allowed_ids.contains(&col_id) {
+                    continue;
+                }
                 let blocks: Vec<usize> = footer.blocks.iter()
                     .enumerate()
                     .filter(|(_, m)| m.column_id == col_id)
@@ -331,6 +540,69 @@ fn collect_leaf_blocks(
                 }
             }
         }
+    }
+}
+
+/// Recursively collect all column_ids from a descriptor tree (including children).
+fn collect_column_ids(desc: &ColumnDescriptor, out: &mut HashSet<u16>) {
+    let dtype_tag = FluxDType::from_u8(desc.dtype_tag).unwrap_or(FluxDType::UInt64);
+    match dtype_tag {
+        FluxDType::StructContainer | FluxDType::ListContainer | FluxDType::MapContainer => {
+            for child in &desc.children {
+                collect_column_ids(child, out);
+            }
+        }
+        _ => {
+            out.insert(desc.column_id);
+        }
+    }
+}
+
+/// Build an Arrow Schema from the Atlas footer's schema tree (no decompression).
+pub fn schema_from_footer(footer: &AtlasFooter) -> Schema {
+    let fields: Vec<Field> = footer.schema.iter()
+        .map(|desc| field_from_descriptor(desc))
+        .collect();
+    Schema::new(fields)
+}
+
+/// Convert a ColumnDescriptor into an Arrow Field.
+fn field_from_descriptor(desc: &ColumnDescriptor) -> Field {
+    let dtype_tag = FluxDType::from_u8(desc.dtype_tag).unwrap_or(FluxDType::UInt64);
+    match dtype_tag {
+        FluxDType::StructContainer => {
+            let children: Vec<Field> = desc.children.iter()
+                .map(|c| field_from_descriptor(c))
+                .collect();
+            Field::new(&desc.name, DataType::Struct(Fields::from(children)), false)
+        }
+        FluxDType::ListContainer => {
+            let item_field = if desc.children.len() >= 2 {
+                field_from_descriptor(&desc.children[1])
+            } else {
+                Field::new("item", DataType::Int64, true)
+            };
+            Field::new(&desc.name, DataType::List(Arc::new(item_field)), false)
+        }
+        FluxDType::MapContainer => {
+            let key_field = if desc.children.len() >= 2 {
+                field_from_descriptor(&desc.children[1])
+            } else {
+                Field::new("key", DataType::Utf8, false)
+            };
+            let val_field = if desc.children.len() >= 3 {
+                field_from_descriptor(&desc.children[2])
+            } else {
+                Field::new("value", DataType::Int64, true)
+            };
+            let entries = Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![key_field, val_field])),
+                false,
+            );
+            Field::new(&desc.name, DataType::Map(Arc::new(entries), false), false)
+        }
+        _ => Field::new(&desc.name, dtype_tag.to_arrow(), false),
     }
 }
 
