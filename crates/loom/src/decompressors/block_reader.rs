@@ -17,6 +17,7 @@ use crate::{
         dict_compressor,
         lz4_compressor,
         string_compressor,
+        alp_compressor,
     },
 };
 
@@ -80,6 +81,7 @@ fn decompress_inner(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
         dict_compressor::TAG       => dict_compressor::decompress(data),
         bit_slab_compressor::TAG   => bit_slab_compressor::decompress(data),
         lz4_compressor::TAG        => lz4_compressor::decompress(data),
+        alp_compressor::TAG        => alp_compressor::decompress(data),
         // String blocks are handled separately (they return Vec<Vec<u8>>,
         // not Vec<u128>). This tag should not reach decompress_inner.
         string_compressor::TAG     => Err(FluxError::InvalidFile(

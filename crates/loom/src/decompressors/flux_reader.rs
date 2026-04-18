@@ -193,6 +193,9 @@ impl FluxReader {
     ) -> FluxResult<RecordBatch> {
         use rayon::prelude::*;
         use std::collections::HashMap;
+        use crate::compressors::string_compressor::{
+            self, decompress_cross_column_group, SUB_CROSS_GROUP,
+        };
 
         // Phase 1: Collect leaf blocks, filtered by projected column_ids.
         let mut leaf_blocks: Vec<(u16, Vec<usize>)> = Vec::new();
@@ -202,7 +205,42 @@ impl FluxReader {
             );
         }
 
-        // Phase 2: Parallel decompression of projected leaves only.
+        // Phase 1b: Identify unique cross-column group payloads (by file
+        // offset). N string columns belonging to the SAME group currently
+        // each trigger their own SUB_CROSS_GROUP decode — we collapse those
+        // into a single decode per offset, then serve all member columns
+        // from the cache. This is the single biggest decompression win on
+        // wide schemas (mixed-bench drops from N to 1–2 FSST decodes).
+        let mut group_offsets: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
+        let mut group_dtype_by_offset: HashMap<u64, FluxDType> = HashMap::new();
+        for (_col_id, block_indices) in &leaf_blocks {
+            for &bi in block_indices {
+                let meta = &footer.blocks[bi];
+                let start = meta.block_offset as usize;
+                if start + 2 <= data.len()
+                    && data[start] == string_compressor::TAG
+                    && data[start + 1] == SUB_CROSS_GROUP
+                {
+                    group_offsets.insert(meta.block_offset);
+                    group_dtype_by_offset.insert(meta.block_offset, meta.dtype_tag);
+                }
+            }
+        }
+        // Decode each unique group payload ONCE in parallel.
+        let group_cache: HashMap<u64, HashMap<u16, ArrayRef>> = group_offsets
+            .into_par_iter()
+            .map(|off| {
+                let dtype_tag = *group_dtype_by_offset.get(&off).unwrap_or(&FluxDType::Utf8);
+                let parts = decompress_cross_column_group(&data[off as usize..], dtype_tag)?;
+                let mut m: HashMap<u16, ArrayRef> = HashMap::with_capacity(parts.len());
+                for (cid, arr) in parts { m.insert(cid, arr); }
+                Ok((off, m))
+            })
+            .collect::<FluxResult<HashMap<u64, HashMap<u16, ArrayRef>>>>()?;
+
+        // Phase 2: Parallel decompression of projected leaves only. Grouped
+        // columns short-circuit to the group cache instead of re-decoding.
         let decompressed: HashMap<u16, LeafData> = leaf_blocks
             .into_par_iter()
             .map(|(col_id, block_indices)| {
@@ -216,11 +254,30 @@ impl FluxReader {
                 if is_string {
                     let mut arrays: Vec<ArrayRef> = Vec::new();
                     for &bi in &block_indices {
-                        let start = footer.blocks[bi].block_offset as usize;
-                        let arr = crate::compressors::string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?;
+                        let meta = &footer.blocks[bi];
+                        let start = meta.block_offset as usize;
+                        // Group cache hit: zero-cost slice from pre-decoded group.
+                        if let Some(group) = group_cache.get(&meta.block_offset) {
+                            if let Some(arr) = group.get(&meta.column_id) {
+                                arrays.push(arr.clone());
+                                continue;
+                            }
+                        }
+                        let arr = string_compressor::decompress_to_arrow_string_for_column(
+                            &data[start..], dtype_tag, Some(meta.column_id),
+                        )?;
                         arrays.push(arr);
                     }
                     Ok((col_id, LeafData::StringArrays(arrays)))
+                } else if matches!(dtype_tag, FluxDType::Decimal128) {
+                    // Full 128-bit decode for Decimal128 / i128 / u128 columns.
+                    let mut all_values: Vec<u128> = Vec::new();
+                    for &bi in &block_indices {
+                        let start = footer.blocks[bi].block_offset as usize;
+                        let (values, _) = decompress_block(&data[start..])?;
+                        all_values.extend(values);
+                    }
+                    Ok((col_id, LeafData::Numeric128(all_values)))
                 } else {
                     let mut all_values: Vec<u64> = Vec::new();
                     for &bi in &block_indices {
@@ -262,8 +319,11 @@ impl FluxReader {
         if matches!(dtype_tag, FluxDType::Utf8 | FluxDType::LargeUtf8) {
             // Fast path: build StringArray directly without per-string allocs.
             if candidates.len() == 1 {
-                let start = footer.blocks[candidates[0]].block_offset as usize;
-                let array = string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?;
+                let meta = &footer.blocks[candidates[0]];
+                let start = meta.block_offset as usize;
+                let array = string_compressor::decompress_to_arrow_string_for_column(
+                    &data[start..], dtype_tag, Some(meta.column_id),
+                )?;
                 let schema = Arc::new(Schema::new(vec![
                     Field::new(&self.column_name, arrow_dt, false),
                 ]));
@@ -272,8 +332,11 @@ impl FluxReader {
             // Multiple blocks: decompress each to StringArray, then concat.
             let mut arrays: Vec<ArrayRef> = Vec::with_capacity(candidates.len());
             for &block_idx in candidates {
-                let start = footer.blocks[block_idx].block_offset as usize;
-                arrays.push(string_compressor::decompress_to_arrow_string(&data[start..], dtype_tag)?);
+                let meta = &footer.blocks[block_idx];
+                let start = meta.block_offset as usize;
+                arrays.push(string_compressor::decompress_to_arrow_string_for_column(
+                    &data[start..], dtype_tag, Some(meta.column_id),
+                )?);
             }
             let refs: Vec<&dyn arrow_array::Array> = arrays.iter().map(|a| a.as_ref()).collect();
             let concat = arrow::compute::concat(&refs).map_err(FluxError::Arrow)?;
@@ -339,7 +402,30 @@ impl LoomDecompressor for FluxReader {
             return self.decompress_string_blocks(data, &footer, &candidates, dtype_tag);
         }
 
-        // ── Numeric path: parallel decompress to u64 ─────────────────────
+        // ── Decimal128 path: stay in u128 ────────────────────────
+        if matches!(dtype_tag, FluxDType::Decimal128) {
+            let chunks_128: Vec<Vec<u128>> = candidates
+                .par_iter()
+                .map(|&block_idx| {
+                    let meta = &footer.blocks[block_idx];
+                    let start = meta.block_offset as usize;
+                    let block_slice = &data[start..];
+                    let (values, _) = decompress_block(block_slice)?;
+                    Ok(values)
+                })
+                .collect::<FluxResult<_>>()?;
+            let total: usize = chunks_128.iter().map(|c| c.len()).sum();
+            let mut all_values: Vec<u128> = Vec::with_capacity(total);
+            for chunk in chunks_128 { all_values.extend(chunk); }
+            let arrow_dt = dtype_tag.to_arrow();
+            let array = reconstruct_decimal128(&all_values)?;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(&self.column_name, arrow_dt, false),
+            ]));
+            return RecordBatch::try_new(schema, vec![array]).map_err(FluxError::Arrow);
+        }
+
+        // ── Numeric path: parallel decompress to u64 ─────────────────
         let chunks: Vec<Vec<u64>> = candidates
             .par_iter()
             .map(|&block_idx| {
@@ -498,6 +584,8 @@ fn empty_batch(col_name: &str) -> FluxResult<RecordBatch> {
 enum LeafData {
     /// Numeric values as u64 (covers all types ≤ 64 bits).
     Numeric(Vec<u64>),
+    /// 128-bit numeric values (Decimal128 / i128 / u128).
+    Numeric128(Vec<u128>),
     /// String/binary arrays (already built as Arrow arrays).
     StringArrays(Vec<ArrayRef>),
 }
@@ -639,7 +727,11 @@ fn reassemble_column_fast(
                 // Determine list count from bases (3 children) or values (2 children).
                 let child_col_id = desc.children[1].column_id;
                 let n = leaves.get(&child_col_id)
-                    .map(|ld| match ld { LeafData::Numeric(v) => v.len(), LeafData::StringArrays(a) => a.iter().map(|x| x.len()).sum() })
+                    .map(|ld| match ld {
+                        LeafData::Numeric(v) => v.len(),
+                        LeafData::Numeric128(v) => v.len(),
+                        LeafData::StringArrays(a) => a.iter().map(|x| x.len()).sum(),
+                    })
                     .unwrap_or(0);
                 let num_lists = if desc.children.len() == 3 { n } else { n / clen as usize };
                 let mut offs = Vec::with_capacity(num_lists + 1);
@@ -737,6 +829,11 @@ fn reassemble_column_fast(
                     let field = Field::new(&desc.name, dtype_tag.to_arrow(), false);
                     Ok((array, field))
                 }
+                LeafData::Numeric128(values) => {
+                    let array = reconstruct_decimal128(values)?;
+                    let field = Field::new(&desc.name, dtype_tag.to_arrow(), false);
+                    Ok((array, field))
+                }
                 LeafData::StringArrays(arrays) => {
                     let array: ArrayRef = if arrays.len() == 1 {
                         arrays[0].clone()
@@ -756,9 +853,23 @@ fn reassemble_column_fast(
 /// [`FluxDType`] tag. This is the central type-dispatch for decompression —
 /// the inverse of the bit-cast performed in `extract_column_data()`.
 pub fn reconstruct_array(values: &[u128], dtype_tag: FluxDType) -> FluxResult<ArrayRef> {
+    if matches!(dtype_tag, FluxDType::Decimal128) {
+        return reconstruct_decimal128(values);
+    }
     // Delegate to the u64 path for all types ≤ 64 bits.
     let v: Vec<u64> = values.iter().map(|&x| x as u64).collect();
     reconstruct_array_u64(v, dtype_tag)
+}
+
+/// Build a `Decimal128Array` from raw `u128` bit patterns (i128 reinterpret).
+/// Default precision/scale (38, 10) match `FluxDType::Decimal128.to_arrow()`.
+fn reconstruct_decimal128(values: &[u128]) -> FluxResult<ArrayRef> {
+    use arrow_array::Decimal128Array;
+    let v: Vec<i128> = values.iter().map(|&x| x as i128).collect();
+    let arr = Decimal128Array::from(v)
+        .with_precision_and_scale(38, 10)
+        .map_err(FluxError::Arrow)?;
+    Ok(Arc::new(arr))
 }
 
 /// Reconstruct a typed Arrow array directly from `u64` values.
@@ -866,6 +977,39 @@ mod tests {
         ]));
         let arr = Arc::new(UInt64Array::from(values));
         RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
+
+    #[test]
+    fn decimal128_round_trip_full_width() {
+        // Values that overflow u64 to verify the full i128 path is honoured.
+        // Includes a mix of very large positive, very large negative, and
+        // small values so OutlierMap / BitSlab patching is exercised.
+        use arrow_array::Decimal128Array;
+        let values: Vec<i128> = vec![
+            0_i128,
+            1_i128,
+            i128::MAX / 2,
+            -(i128::MAX / 3),
+            12_345_678_901_234_567_890_i128,        // > u64::MAX
+            -98_765_432_109_876_543_210_i128,
+            1_000_000_000_000_000_000_000_000_i128, // ~10^24
+        ];
+        let arr = Decimal128Array::from(values.clone())
+            .with_precision_and_scale(38, 10).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Decimal128(38, 10), false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+
+        let writer = FluxWriter::new();
+        let bytes = writer.compress(&batch).unwrap();
+        let reader = FluxReader::new("d");
+        let out = reader.decompress_all(&bytes).unwrap();
+        let col = out.column(0).as_any().downcast_ref::<Decimal128Array>().unwrap();
+        assert_eq!(col.len(), values.len());
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(col.value(i), expected, "row {i}");
+        }
     }
 
     #[test]

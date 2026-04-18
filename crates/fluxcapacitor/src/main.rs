@@ -23,6 +23,7 @@ mod inspector;
 mod bench;
 mod dtype_bench;
 mod string_bench;
+mod mixed_bench;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -114,6 +115,12 @@ enum Commands {
         #[arg(long, default_value_t = 10_000_000)]
         rows: usize,
     },
+
+    /// Realistic 22-column mixed-schema benchmark (mirrors Databricks test).
+    MixedBench {
+        #[arg(long, default_value_t = 9_950_000)]
+        rows: usize,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +161,9 @@ fn main() -> Result<()> {
         }
         Commands::StringBench { rows } => {
             string_bench::cmd_string_bench(rows)
+        }
+        Commands::MixedBench { rows } => {
+            mixed_bench::cmd_mixed_bench(rows)
         }
     }
 }

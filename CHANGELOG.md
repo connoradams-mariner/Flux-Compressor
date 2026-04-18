@@ -8,13 +8,104 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+(No unreleased changes — see `v0.3.0` below.)
+
+---
+
+## [0.3.0] — 2026-04-18
+
+This release is the **adaptive-string + real-numeric** overhaul. Headline
+result on a 22-column 9.95M-row Databricks-shaped workload:
+Flux Archive **302 MB (9.47×)** vs Parquet zstd-3 **448 MB (6.37×)** at
+parity decompression throughput.
+
 ### Added
+
+#### String compression (`crates/loom/src/compressors/string_compressor.rs`)
+- **FSST symbol-table compressor** — new sub-strategies `SUB_FSST_LZ4`
+  (0x09) and `SUB_FSST_ZSTD` (0x0A). Per-column symbol-table training
+  from a sampled corpus; bulk and rayon-parallel encode paths.
+- **Trained Zstd dictionary** — `SUB_RAW_ZSTD_DICT` (0x0B) and
+  `SUB_FSST_ZSTD_DICT` (0x0C). Archive-profile only. Trained from a
+  bounded sample and bake-off-gated.
+- **Front coding** — `SUB_FRONT_CODED` (0x0D). Varint-encoded
+  shared-prefix / suffix pairs, LZ4 or Zstd post-pass. Orders-of-
+  magnitude wins on sorted paths / SKUs.
+- **Sub-block container** — `SUB_MULTI` (0x0F) splits columns >1M rows
+  into 500K-row chunks, re-decides sub-strategy per chunk, rayon-parallel
+  encode and decode. Doubles as a streaming checkpoint.
+- **Cross-column grouping** — `SUB_CROSS_GROUP` (0x0E) and new public
+  functions `compress_cross_column_group_with_profile` +
+  `decompress_cross_column_group`. Shared FSST / zstd dictionary across
+  compatible sibling columns. Guarded by
+  `GROUP_MAX_COMBINED_BYTES = 128 MB`, `GROUP_PER_COLUMN_MAX_BYTES = 32 MB`,
+  and a probe-based profitability bakeoff. Partition-source columns
+  auto-isolated via `FluxWriter::isolated_set()`.
+- **Offsets through the Loom pipeline** — all current raw/FSST paths
+  compress the offset column via `compress_index_column` (DeltaDelta +
+  BitSlab + FOR), replacing the old LZ4-on-raw-bytes layout.
+  `SUB_RAW_LZ4_LEGACY` / `SUB_RAW_ZSTD_LEGACY` are preserved read-only
+  for backwards compatibility.
+- `StringGroupingMode { Off, Auto, Manual(Vec<Vec<String>>) }` plus
+  `FluxWriter::with_string_grouping`, `with_isolated_string_columns`,
+  and `with_partition_spec` configuration knobs.
+- `decompress_to_arrow_string_for_column(data, dtype_tag, Some(column_id))`
+  for column-id-aware cross-group decoding.
+
+#### Numeric compression
+- **ALP for Float64 / Float32** — new `alp_compressor` module
+  (TAG = 0x09). Detects decimal-shaped floats (prices, lat/lon,
+  integer-as-float), encodes integer mantissas through the Loom pipeline
+  with a sparse outlier map. Bit-exact round-trip check via
+  `(m as f64) / scale` for numerical stability.
+- **Native Decimal128 (i128 / u128) round-trip** —
+  `compress_decimal128_column` in `FluxWriter` extracts i128 values
+  directly from `Decimal128Array` and feeds the full u128 pipeline.
+  `LeafData::Numeric128(Vec<u128>)` reader variant and
+  `reconstruct_decimal128` build a proper `Decimal128Array` out.
+
+#### Reader / streaming
+- **Group-level decode cache** in `decompress_with_schema_projected`:
+  when N columns share a cross-group block offset, the inner payload is
+  decoded ONCE in parallel and all member columns served from cache.
+  Closes the decompression throughput gap to Parquet on wide schemas.
+- Mixed-schema benchmark binary `fluxcapacitor mixed-bench` mirroring
+  the real-world 22-column Databricks workload.
+- String compression benchmark binary `fluxcapacitor string-bench` with
+  6 representative patterns at 10M rows.
+
+#### Python pandas support (carried from Unreleased)
 - `fluxcompress.pandas` module with `compress_df`, `decompress_df`,
   `compress_series`, `decompress_series`, `compress_column`, `round_trip`,
   and `compression_stats`.
-- `python/tests/conftest.py` with shared session-scoped fixtures for all
-  test modules.
+- `python/tests/conftest.py` shared session-scoped fixtures.
 - `python/tests/test_pandas.py` — full pandas integration test suite.
+
+### Fixed
+
+- **Classifier bug on monotonic sequences** — `bit_entropy` bins on the
+  top 8 occupied bits, which meant long monotonic offset / index
+  sequences (all in the same top-byte bucket) looked like constants
+  and were mis-routed to RLE. RLE on non-constant data expanded output
+  catastrophically. Added an endpoint-equality guard so RLE only fires
+  when `first == mid == last`. This silently improves every use of the
+  Loom pipeline on structured data.
+
+### Changed
+
+- String block layout bumped: raw-path blocks now emit
+  `SUB_RAW_LZ4 = 0x07` / `SUB_RAW_ZSTD = 0x08` with Loom-pipeline
+  offsets. Legacy 0x01 / 0x02 codes stay readable.
+- `decompress_to_arrow_string` now preserves its previous single-argument
+  signature but delegates to `decompress_to_arrow_string_for_column` with
+  `None` to handle both grouped and non-grouped blocks uniformly.
+
+### Known limitations
+
+- **f128 (IEEE 754 binary128)** — not yet supported in-Arrow because
+  `arrow_schema::DataType` has no `Float128` variant. The on-disk
+  pipeline can already carry 128-bit bit-patterns via `Decimal128`; full
+  f128 plumbing is tracked in [docs/roadmap-f128.md](docs/roadmap-f128.md).
 
 ---
 

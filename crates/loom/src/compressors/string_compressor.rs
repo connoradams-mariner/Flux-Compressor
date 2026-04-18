@@ -1598,9 +1598,37 @@ fn decompress_fsst(
 /// Avoids the `Vec<Vec<u8>>` → `Vec<String>` → `StringArray` allocation chain
 /// by building the offset and data buffers in a single pass.
 pub fn decompress_to_arrow_string(data: &[u8], dtype_tag: FluxDType) -> FluxResult<ArrayRef> {
+    decompress_to_arrow_string_for_column(data, dtype_tag, None)
+}
+
+/// Decompress a string block into an Arrow array. If the block is a
+/// `SUB_CROSS_GROUP` container, `column_id` selects which column to extract.
+/// For non-grouped blocks, `column_id` is ignored.
+pub fn decompress_to_arrow_string_for_column(
+    data: &[u8],
+    dtype_tag: FluxDType,
+    column_id: Option<u16>,
+) -> FluxResult<ArrayRef> {
     if data.is_empty() || data[0] != TAG {
         return Err(FluxError::InvalidFile("not a String block".into()));
     }
+    // Cross-column group: decompress once, then slice to the requested column.
+    if data.len() >= 2 && data[1] == SUB_CROSS_GROUP {
+        let parts = decompress_cross_column_group(data, dtype_tag)?;
+        if let Some(want) = column_id {
+            for (col_id, arr) in &parts {
+                if *col_id == want {
+                    return Ok(arr.clone());
+                }
+            }
+            return Err(FluxError::InvalidFile(format!(
+                "cross-group block has no column_id {want}"
+            )));
+        }
+        // No column id specified: return the first column (legacy behaviour).
+        return Ok(parts.into_iter().next().unwrap().1);
+    }
+
     let mut cur = Cursor::new(data);
     let _tag = cur.read_u8()?;
     let sub_strategy = cur.read_u8()?;

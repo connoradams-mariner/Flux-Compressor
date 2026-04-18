@@ -12,11 +12,58 @@ time travel.
 
 ---
 
-## Benchmarks (1M Rows)
+## Benchmarks
 
-All numbers from `fluxcapacitor dtype-bench --rows 1000000` on Linux
-(Rust release build, mmap reads, rayon parallel). Raw size is the
-in-memory Arrow footprint.
+All numbers from `fluxcapacitor` on Linux (Rust release build, mmap reads,
+rayon parallel). Raw size is the in-memory Arrow footprint unless noted.
+
+### Mixed 22-column schema — 9.95M rows (Databricks-shaped workload)
+
+`cargo run -p fluxcapacitor --release -- mixed-bench --rows 9950000`
+
+```
+Codec                     Size       Ratio    Comp MB/s   Dec MB/s
+──────────────────────  ─────────  ───────  ──────────  ────────
+Flux (Archive)            302 MB     9.47×          ~700       ~1160
+Parquet (zstd-3)          448 MB     6.37×          ~360       ~1150
+```
+
+Schema: 4×Int64, 4×Float64, 2×Timestamp, 1×Date32, 3×Boolean, 8×Utf8.
+Flux wins on compression ratio by **32.7%** while matching Parquet's
+decompression throughput. On a 2.01 GB CSV round-trip the same schema
+typically shows a ~15 MB ratio advantage for Flux with Flux
+decompression ~90 MB/s faster than Parquet, Parquet compression
+~13 MB/s faster than Flux.
+
+### High-cardinality string corpus — 10M rows
+
+`cargo run -p fluxcapacitor --release -- string-bench --rows 10000000`
+
+```
+Pattern              Profile     Ratio      Comp MB/s   Dec MB/s
+──────────────────  ──────────  ─────────  ──────────  ────────
+urls_high_card       Speed       3.1×        606         504
+urls_high_card       Archive     3.7×        573         835
+uuids                Speed       1.6×        483         517
+uuids                Archive     1.9×        281         863
+log_lines            Speed       3.1×       1306         792
+log_lines            Archive     6.0×        988         677
+sorted_paths         Speed    1,227.3×       6306        1168
+sorted_paths         Archive 17,109.1×       5525        1112
+mixed_categorical    any        18.0×       1403        1977
+short_skus           Speed    1,017.7×       3230        1808
+short_skus           Archive 16,908.2×       2678        1677
+```
+
+Adaptive per-column selection across Dict, FSST, front-coding, trained
+zstd dictionary, sub-block (`SUB_MULTI`), and cross-column groups.
+Sorted/hierarchical data (paths, formatted SKUs) gets four-orders-of-
+magnitude compression from front-coding + zstd secondary. High-cardinality
+text (URLs, logs) gets 1.6–3.7× from FSST with LZ4/Zstd on top.
+
+### Single-type micro bench — 1M rows
+
+All numbers from `fluxcapacitor dtype-bench --rows 1000000`.
 
 ### Compression Ratio
 
@@ -278,12 +325,14 @@ All types round-trip losslessly through `FluxWriter` → `.flux` file →
 
 ```
 Category           Types                                          Routing
-─────────────────  ─────────────────────────────────────────────  ─────────────────
+─────────────────  ────────────────────────────────────────  ─────────────────
 Integers           UInt8, UInt16, UInt32, UInt64                  u8/u16 → BitSlab
                    Int8, Int16, Int32, Int64                      fast path; others
                                                                   → Loom Classifier
 
-Floats             Float32, Float64                               → Loom Classifier
+Floats             Float32, Float64                               → ALP (decimal
+                                                                    detection) with
+                                                                    Loom fallback
 
 Temporal           Date32, Date64                                 → Loom Classifier
                    Timestamp (Second, Millis, Micros, Nanos)      → DeltaDelta fast
@@ -292,17 +341,47 @@ Temporal           Date32, Date64                                 → Loom Class
 
 Boolean            Boolean                                        → RLE fast path
 
-Decimal            Decimal128                                     → Loom Classifier
-                                                                    (u128 path)
+Decimal / 128-bit  Decimal128 (i128 / u128 carrier)               → Full u128
+                                                                    pipeline with
+                                                                    OutlierMap
 
-Variable-length    Utf8, LargeUtf8, Binary, LargeBinary           → String pipeline
-                                                                    (dict or LZ4/Zstd)
+Variable-length    Utf8, LargeUtf8, Binary, LargeBinary           → Adaptive string
+                                                                    pipeline (see
+                                                                    below)
 
 Nested             Struct, List, Map                              → Recursive
                                                                     flattening +
                                                                     parallel per-leaf
                                                                     compression
 ```
+
+### Adaptive string pipeline
+
+The string compressor selects per-column (and per-sub-block for large
+columns) from 9 sub-strategies using probe-based bakeoffs so it only
+spends what the data demands:
+
+```
+Sub-strategy         When it fires                         Typical win
+───────────────────  ──────────────────────────────────────  ───────────────
+Dict                 Cardinality ≤ 30 % (sampled)          18×
+Raw LZ4 / Raw Zstd   High-card baseline                    1.5–2×
+FSST (LZ4 / Zstd)    Repeated 2–8 byte substrings          2×–4×
+                     (URLs, UUIDs, log lines)
+Raw / FSST + zstd    Large Archive blocks where a          +5–30 % vs plain
+  trained dict         dictionary beats plain zstd          zstd
+Front-coded          ≥98 % sorted + ≥8-byte shared prefix   **orders of**
+                     (paths, formatted SKUs)               **magnitude**
+Sub-block (MULTI)    Row count > 1M — splits into 500K     parallel encode,
+                     sub-blocks, re-decides per-block       streaming-friendly
+Cross-column group   Multiple compatible string columns    single FSST /
+                     under ≈128 MB combined, if a probe    zstd dict shared
+                     bakeoff shows it beats per-column      across columns
+```
+
+Partition-source columns (from `TableMeta.current_spec()`) are
+automatically excluded from cross-column grouping so predicate pushdown
+and partition pruning stay correct.
 
 ---
 
@@ -460,23 +539,71 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 - **Nested types** — Struct/List/Map with lengths-not-offsets, delta-from-base, key sorting
 - **Throughput optimizations** — u64 decompress path, direct Arrow string construction, parallel leaf compress/decompress, sampled cardinality estimation
 
-### In Progress (v0.3)
+### Completed (v0.3)
 
-- **Fused encode + compress** — stream encoder output directly into LZ4/Zstd, eliminating intermediate buffers. Estimated 15–20% compress speedup.
-- **Zstd dictionary** — train on first blocks, compress subsequent with shared context. 30–40% Archive profile speedup.
-- **Generic classifier** — `classify<T>` over native width, avoiding u128 widening in the classify hot path.
+- **FSST symbol-table compression** — per-column static symbol tables on
+  high-cardinality strings (URLs, UUIDs, log lines). Probe-based bakeoff
+  picks FSST vs raw vs trained-zstd-dict per column.
+- **Front coding for sorted/hierarchical data** — shared-prefix encoding
+  that yields 1,000–17,000× compression on sorted paths, SKUs, and
+  other monotonic strings.
+- **Sub-block container (`SUB_MULTI`)** — splits columns >1M rows into
+  500K-row sub-blocks, each independently re-deciding its sub-strategy.
+  Enables parallel encode/decode and streaming checkpoints.
+- **Cross-column string grouping** — trains ONE shared FSST/zstd
+  dictionary across compatible sibling columns. Guarded by a
+  profitability bakeoff, a 128 MB combined-size ceiling, and a 32 MB
+  per-column ceiling so wide Databricks/Spark workloads never OOM.
+  Partition-source columns are automatically isolated.
+- **ALP for Float64 / Float32** — detects decimal-shaped floats
+  (prices, lat/lon, integer-as-float) and encodes integer mantissas
+  through the BitSlab / DeltaDelta pipeline with outlier patching.
+- **Native Decimal128 (i128 / u128) round-trip** — `Decimal128Array`
+  columns use the full u128 pipeline end-to-end (BitSlab + OutlierMap)
+  so values >u64::MAX are preserved exactly.
+- **Classifier fix for monotonic sequences** — `bit_entropy` no longer
+  false-fires on RLE for monotonic offsets / indices. This fixes a
+  codebase-wide correctness issue where long monotonic integer columns
+  could blow up to raw size.
+- **Group-level decode cache** — when N columns share a cross-group
+  block, the reader decodes once and serves every member from cache,
+  closing the decompression gap to Parquet.
 
-### Planned (v0.4+)
+### In Progress (v0.4)
 
-- **Null bitmap support** — compress only dense non-null values, reconstruct nulls on read. BlockMeta field exists, implementation pending.
-- **Predicate pushdown for strings** — min/max string metadata in footer for Z-Order skipping on string columns.
-- **SIMD decompression** — AVX2/NEON-accelerated BitSlab unpacking on the decompress path (currently SIMD is compress-only).
-- **Parquet-competitive Float64 decode** — investigate direct bit-copy from decompressed buffer to Arrow Float64 buffer without per-value `from_bits` conversion.
-- **Zero-copy buffer sharing** — return Arrow buffers backed by the decompressed block memory without copying. Requires `unsafe` alignment guarantees.
+- **SIMD decompression** — AVX2/NEON-accelerated BitSlab unpacking on
+  the decompress path (currently SIMD is compress-only).
+- **Null bitmap support** — compress only dense non-null values,
+  reconstruct nulls on read. BlockMeta field exists, implementation
+  pending.
+- **Predicate pushdown for strings** — min/max string metadata in
+  footer for Z-Order skipping on string columns.
+- **FSST zero-alloc decode** — build Arrow `StringArray` buffers
+  directly from FSST codes without the intermediate `Vec<Vec<u8>>`.
+
+### Planned (v0.5+)
+
+- **f128 (IEEE 754 binary128) support** — full pipeline integration for
+  128-bit floats. See [docs/roadmap-f128.md](docs/roadmap-f128.md) for
+  the full plan; current blocker is that Arrow doesn't yet expose a
+  `Float128` data type, so there is no in-Arrow transport for the
+  values. Our on-disk format already has everything needed (u128
+  pipeline + `Decimal128` carrier as a stop-gap); we're waiting on the
+  Arrow community spec.
+- **Parquet-competitive Float64 decode** — direct bit-copy from
+  decompressed buffer to Arrow Float64 buffer without per-value
+  `from_bits` conversion.
+- **Zero-copy buffer sharing** — return Arrow buffers backed by the
+  decompressed block memory without copying. Requires `unsafe`
+  alignment guarantees.
+- **Global cross-file FSST dictionaries** — share symbol tables across
+  `.flux` files in a table so cold-storage optimization phases can
+  reuse training work.
 
 See also:
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
 - [docs/roadmap-wal.md](docs/roadmap-wal.md) — Binary WAL migration
+- [docs/roadmap-f128.md](docs/roadmap-f128.md) — IEEE 754 binary128 integration plan
 
 ---
 
