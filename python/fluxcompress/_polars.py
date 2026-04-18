@@ -237,20 +237,26 @@ def write_flux_table(
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
     partition_by: "list[dict] | None" = None,
     clustering_columns: "list[str] | None" = None,
+    mode: str = "error",
+    compute_stats: bool = False,
+    max_workers: "int | None" = None,
 ) -> str:
     """
     Write a Polars DataFrame to a ``.fluxtable`` directory.
 
-    Creates the directory structure, compresses the data in chunks (one
-    ``.flux`` part file per chunk), and writes a transaction log entry.
-    Supports hidden partitioning and liquid clustering metadata.
+    Thin wrapper around :class:`FluxTableWriter`. For streaming writes
+    from a batch iterator (e.g. ``pl.scan_csv(...).collect_batches(N)`` or
+    a PySpark DataFrame), prefer the context-manager API directly so the
+    transaction log is committed once instead of per-batch.
 
     Parameters
     ----------
     df:
-        The DataFrame to write.
+        The DataFrame to write. Also accepts PyArrow tables / pandas
+        DataFrames / PySpark DataFrames — see :class:`FluxTableWriter`.
     path:
         Path for the ``.fluxtable`` directory.  Created if it doesn't exist.
+        Supports ``gs://``, ``s3://``, ``az://`` URIs when fsspec is installed.
     profile:
         Compression profile (``"speed"``, ``"balanced"``, ``"archive"``).
     u64_only:
@@ -258,144 +264,47 @@ def write_flux_table(
     chunk_size:
         Maximum rows per part file.  Default 500,000.
     partition_by:
-        Optional hidden partition spec.  List of dicts with ``source_column``
-        and ``transform`` keys.  Example::
-
-            [{"source_column": "created_at", "transform": "month"},
-             {"source_column": "country", "transform": "identity"}]
-
-        When provided, rows are grouped by partition values and written as
-        separate part files.  Partition values are stored in the transaction
-        log (hidden partitioning — not encoded in file paths).
+        Optional hidden partition spec. List of dicts with ``source_column``
+        and ``transform`` keys. Duplicate specs are automatically deduped in
+        ``_flux_meta.json`` (fixes a historical bug where appending to a
+        partitioned table inflated the meta file).
     clustering_columns:
-        Optional list of columns for liquid clustering / Z-Order optimization.
-        Stored in ``_flux_meta.json`` for use by ``fc.optimize()``.
+        Columns for liquid clustering / Z-Order optimization.
+    mode:
+        Table-exists behaviour (Spark-style):
 
-    Returns
-    -------
-    str
-        The path to the ``.fluxtable`` directory.
+        - ``"error"`` (default) — refuse if the table already has data.
+        - ``"overwrite"`` — atomically replace any existing data.
+        - ``"append"`` — add to existing data.
+        - ``"ignore"`` — no-op if the table exists.
+    compute_stats:
+        Compute per-column min/max/null_count and store in the file
+        manifest. Default ``False`` because on wide schemas this is often
+        the single biggest cost of a write.
+    max_workers:
+        Threads for parallel batch compression (default = CPU count).
 
     Example
     -------
-    >>> fc.write_flux_table(df, "events.fluxtable", profile="archive",
+    >>> fc.write_flux_table(df, "events.fluxtable",
+    ...     profile="archive", mode="overwrite",
     ...     partition_by=[{"source_column": "country", "transform": "identity"}],
     ...     clustering_columns=["country", "created_at"])
     """
-    import os
-    import json
-    import time
+    from fluxcompress._table_writer import FluxTableWriter
 
-    try:
-        import polars as pl  # noqa: F401
-    except ImportError:
-        raise ImportError(
-            "polars is required for write_flux_table(). "
-            "Install it with: pip install fluxcompress[polars]"
-        ) from None
-
-    data_dir = os.path.join(path, "data")
-    log_dir = os.path.join(path, "_flux_log")
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Write / update _flux_meta.json.
-    meta_path = os.path.join(path, "_flux_meta.json")
-    if os.path.exists(meta_path):
-        with open(meta_path) as f:
-            meta = json.load(f)
-    else:
-        meta = {"table_id": f"flux-{int(time.time()*1e9):016x}",
-                "partition_specs": [], "current_spec_id": 0,
-                "clustering_columns": [], "properties": {}}
-
-    if partition_by:
-        spec = {"spec_id": len(meta["partition_specs"]),
-                "fields": [{"source_column": p["source_column"],
-                             "transform": p.get("transform", "identity"),
-                             "field_id": i}
-                            for i, p in enumerate(partition_by)]}
-        meta["partition_specs"].append(spec)
-        meta["current_spec_id"] = spec["spec_id"]
-
-    if clustering_columns:
-        meta["clustering_columns"] = clustering_columns
-
-    with open(meta_path, "w") as f:
-        json.dump(meta, f, indent=2)
-
-    # Determine groups.
-    height = df.height
-    if chunk_size <= 0:
-        chunk_size = height
-
-    part_num = len([f for f in os.listdir(data_dir) if f.endswith(".flux")])
-    written_files: list[str] = []
-    file_manifests: list[dict] = []
-
-    groups: list[tuple[dict, "pl.DataFrame"]] = []
-    if partition_by:
-        # Group by partition column values.
-        group_cols = [p["source_column"] for p in partition_by]
-        for group_vals, group_df in df.group_by(group_cols):
-            if not isinstance(group_vals, tuple):
-                group_vals = (group_vals,)
-            pv = {col: str(val) for col, val in zip(group_cols, group_vals)}
-            groups.append((pv, group_df))
-    else:
-        groups.append(({}, df))
-
-    for partition_values, group_df in groups:
-        for start in range(0, group_df.height, chunk_size):
-            length = min(chunk_size, group_df.height - start)
-            chunk_df = group_df.slice(start, length)
-            buf = compress_polars(chunk_df, profile=profile, u64_only=u64_only, chunk_size=0)
-            filename = f"part-{part_num:04d}.flux"
-            filepath = os.path.join(data_dir, filename)
-            write_flux(buf, filepath)
-            rel_path = f"data/{filename}"
-            written_files.append(rel_path)
-
-            # Build file manifest with column stats.
-            col_stats = {}
-            for col_name in chunk_df.columns:
-                try:
-                    s = chunk_df[col_name]
-                    col_stats[col_name] = {
-                        "min": str(s.min()) if s.len() > 0 else None,
-                        "max": str(s.max()) if s.len() > 0 else None,
-                        "null_count": int(s.null_count()),
-                    }
-                except Exception:
-                    pass  # Skip stats for unsupported types.
-
-            file_manifests.append({
-                "path": rel_path,
-                "partition_values": partition_values,
-                "spec_id": meta["current_spec_id"],
-                "row_count": length,
-                "file_size_bytes": os.path.getsize(filepath),
-                "column_stats": col_stats,
-            })
-            part_num += 1
-            del chunk_df, buf
-
-    # Write transaction log entry.
-    version = len([f for f in os.listdir(log_dir) if f.endswith(".json")])
-    entry = {
-        "version": version,
-        "timestamp_ms": int(time.time() * 1000),
-        "operation": "create" if version == 0 else "append",
-        "data_files_added": written_files,
-        "data_files_removed": [],
-        "file_manifests": file_manifests,
-        "row_count_delta": height,
-        "metadata": {},
-    }
-    log_path = os.path.join(log_dir, f"{version:08d}.json")
-    with open(log_path, "w") as f:
-        json.dump(entry, f, indent=2)
-
+    with FluxTableWriter(
+        path,
+        profile=profile,
+        u64_only=u64_only,
+        chunk_size=chunk_size,
+        partition_by=partition_by,
+        clustering_columns=clustering_columns,
+        compute_stats=compute_stats,
+        mode=mode,
+        max_workers=max_workers,
+    ) as w:
+        w.write_batch(df)
     return path
 
 

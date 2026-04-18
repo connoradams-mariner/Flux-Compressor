@@ -81,6 +81,11 @@ from fluxcompress._polars import (  # noqa: F401
     optimize,
 )
 
+from fluxcompress._table_writer import (  # noqa: F401
+    FluxTableWriter,
+    TableExistsError,
+)
+
 # pandas helpers are imported lazily in fluxcompress.pandas to avoid a hard
 # dependency.  Re-export the submodule reference so users can do:
 #   import fluxcompress.pandas as fcp
@@ -108,6 +113,9 @@ __all__ = [
     "scan_flux",
     "write_flux_table",
     "optimize",
+    # Streaming writer (works with Polars, PySpark, PyArrow, pandas)
+    "FluxTableWriter",
+    "TableExistsError",
     # Batch reader
     "FluxBatchReader",
     # Submodules
