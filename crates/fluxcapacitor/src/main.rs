@@ -22,6 +22,7 @@ mod optimizer;
 mod inspector;
 mod bench;
 mod dtype_bench;
+mod string_bench;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -107,6 +108,12 @@ enum Commands {
         #[arg(long, default_value_t = 1_000_000)]
         rows: usize,
     },
+
+    /// High-cardinality string compression benchmark (per-pattern).
+    StringBench {
+        #[arg(long, default_value_t = 10_000_000)]
+        rows: usize,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +151,9 @@ fn main() -> Result<()> {
         }
         Commands::DtypeBench { rows } => {
             dtype_bench::cmd_dtype_bench(rows)
+        }
+        Commands::StringBench { rows } => {
+            string_bench::cmd_string_bench(rows)
         }
     }
 }

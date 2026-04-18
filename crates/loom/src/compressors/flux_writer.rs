@@ -60,6 +60,24 @@ use crate::{
 // FluxWriter
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Controls how sibling string columns share compression state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringGroupingMode {
+    /// Never group — each string column is compressed independently.
+    Off,
+    /// Automatically group compatible string columns (default).
+    Auto,
+    /// Explicit grouping: each inner `Vec<String>` is one group of column
+    /// names that share compression state.
+    Manual(Vec<Vec<String>>),
+}
+
+impl Default for StringGroupingMode {
+    fn default() -> Self {
+        StringGroupingMode::Auto
+    }
+}
+
 /// The primary [`LoomCompressor`] — writes `.flux` formatted byte buffers.
 #[derive(Debug, Clone)]
 pub struct FluxWriter {
@@ -71,6 +89,16 @@ pub struct FluxWriter {
     /// Disables the OutlierMap / u128 patching. Use when you know all values
     /// fit in 64 bits (the common case for Spark/Polars data).
     pub u64_only: bool,
+    /// Cross-column string grouping policy.
+    pub string_grouping: StringGroupingMode,
+    /// String columns that must never be cross-column grouped. Partition
+    /// source columns are always isolated automatically (see `partition_spec`)
+    /// but callers may add more via this list.
+    pub isolated_string_columns: Vec<String>,
+    /// The active partition spec for this write. Any column referenced as a
+    /// `source_column` in its fields is treated as `isolated` — it's
+    /// compressed standalone so partition pruning + pushdown stay correct.
+    pub partition_spec: Option<crate::txn::partition::PartitionSpec>,
 }
 
 impl Default for FluxWriter {
@@ -79,6 +107,9 @@ impl Default for FluxWriter {
             force_strategy: None,
             profile: crate::CompressionProfile::Speed,
             u64_only: false,
+            string_grouping: StringGroupingMode::default(),
+            isolated_string_columns: Vec::new(),
+            partition_spec: None,
         }
     }
 }
@@ -103,6 +134,41 @@ impl FluxWriter {
     pub fn with_u64_only(mut self, u64_only: bool) -> Self {
         self.u64_only = u64_only;
         self
+    }
+
+    /// Set the cross-column string grouping mode.
+    pub fn with_string_grouping(mut self, mode: StringGroupingMode) -> Self {
+        self.string_grouping = mode;
+        self
+    }
+
+    /// Mark additional string columns as always-isolated (never grouped).
+    pub fn with_isolated_string_columns(mut self, cols: Vec<String>) -> Self {
+        self.isolated_string_columns = cols;
+        self
+    }
+
+    /// Set the active partition spec. Source columns in the spec are
+    /// automatically added to the isolated set.
+    pub fn with_partition_spec(
+        mut self,
+        spec: Option<crate::txn::partition::PartitionSpec>,
+    ) -> Self {
+        self.partition_spec = spec;
+        self
+    }
+
+    /// Returns the full set of isolated string column names (explicit +
+    /// derived from the active partition spec).
+    pub fn isolated_set(&self) -> std::collections::HashSet<String> {
+        let mut out: std::collections::HashSet<String> =
+            self.isolated_string_columns.iter().cloned().collect();
+        if let Some(spec) = &self.partition_spec {
+            for f in &spec.fields {
+                out.insert(f.source_column.clone());
+            }
+        }
+        out
     }
 }
 

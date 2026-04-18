@@ -31,6 +31,8 @@ num-traits  = "0.2"
 # Compression
 lz4_flex    = "0.11"
 zstd        = "0.13"
+# FSST: per-column static symbol table for string compression.
+fsst        = { package = "fsst-rs", version = "0.5" }
 
 # Parallelism
 rayon       = "1.10"

@@ -120,10 +120,19 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
         };
     }
 
-    // ── Step 1: Entropy audit ────────────────────────────────────────────────
+    // ── Step 1: Entropy audit ────────────────────────────────────────
     let entropy = bit_entropy(values);
 
-    if entropy < 1e-9 {
+    // `bit_entropy` bins on the top 8 *occupied* bits, which drives entropy
+    // near 0 for monotonic sequences whose range stays within a single
+    // top-byte bucket (e.g. 65K offsets growing by ~14). RLE on those is
+    // catastrophic. Guard the RLE path with an endpoint-equality sanity
+    // check: for a truly constant column, first == mid == last.
+    let endpoints_equal = values.len() < 3
+        || (values[0] == values[values.len() / 2]
+            && values[0] == values[values.len() - 1]);
+
+    if entropy < 1e-9 && endpoints_equal {
         // All values identical → RLE.
         return ClassificationResult {
             strategy: LoomStrategy::Rle,
