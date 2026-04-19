@@ -468,30 +468,25 @@ def optimize(
 
 
 def _resolve_flux_paths(path: str) -> list[str]:
-    """Resolve a path to a list of .flux file paths."""
+    """Resolve a path to a list of ``.flux`` file paths.
+
+    For FluxTable directories, uses the checkpoint-aware replay helper so
+    reads don't scale with total commit count once a checkpoint exists.
+    """
     import os
-    import json
+    from fluxcompress._table_writer import _Fs, _replay_log
 
     if path.endswith(".flux") and os.path.isfile(path):
         return [path]
 
-    # FluxTable directory — read log to get live files.
     log_dir = os.path.join(path, "_flux_log")
     if not os.path.isdir(log_dir):
         raise FileNotFoundError(
             f"{path} is not a .flux file or .fluxtable directory"
         )
 
-    log_files = sorted(f for f in os.listdir(log_dir) if f.endswith(".json"))
-    live_files: set[str] = set()
-    for lf in log_files:
-        with open(os.path.join(log_dir, lf)) as f:
-            entry = json.load(f)
-        for added in entry.get("data_files_added", []):
-            live_files.add(added)
-        for removed in entry.get("data_files_removed", []):
-            live_files.discard(removed)
-
+    fs = _Fs(path)
+    live_files, _ = _replay_log(fs, log_dir, table_path=path)
     if not live_files:
         raise FileNotFoundError(f"no live data files in {path}")
 
@@ -499,29 +494,18 @@ def _resolve_flux_paths(path: str) -> list[str]:
 
 
 def _resolve_live_manifests(path: str) -> "tuple[list[str], dict[str, dict]]":
-    """Resolve live file paths and their manifests from the transaction log."""
+    """Resolve live file paths and their manifests from the transaction log.
+
+    Uses the checkpoint-aware replay helper so reads stay O(commits since
+    last checkpoint) instead of O(total commits).
+    """
+    from fluxcompress._table_writer import _Fs, _replay_log
     import os
-    import json
 
     log_dir = os.path.join(path, "_flux_log")
-    log_files = sorted(f for f in os.listdir(log_dir) if f.endswith(".json"))
-
-    live_files: set[str] = set()
-    manifests: dict[str, dict] = {}
-
-    for lf in log_files:
-        with open(os.path.join(log_dir, lf)) as f:
-            entry = json.load(f)
-        for added in entry.get("data_files_added", []):
-            live_files.add(added)
-        for removed in entry.get("data_files_removed", []):
-            live_files.discard(removed)
-            manifests.pop(removed, None)
-        for fm in entry.get("file_manifests", []):
-            manifests[fm["path"]] = fm
-
-    live = sorted(live_files)
-    return live, manifests
+    fs = _Fs(path)
+    live, manifests = _replay_log(fs, log_dir, table_path=path)
+    return sorted(live), manifests
 
 
 def _find_overlapping_groups(

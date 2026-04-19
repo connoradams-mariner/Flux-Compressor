@@ -84,6 +84,12 @@ from fluxcompress._polars import (  # noqa: F401
 from fluxcompress._table_writer import (  # noqa: F401
     FluxTableWriter,
     TableExistsError,
+    CommitConflictError,
+    ConcurrentOperationError,
+    LogForkError,
+    ProtocolVersionError,
+    FLUX_TABLE_READER_VERSION,
+    FLUX_TABLE_WRITER_VERSION,
 )
 
 # pandas helpers are imported lazily in fluxcompress.pandas to avoid a hard
@@ -116,6 +122,12 @@ __all__ = [
     # Streaming writer (works with Polars, PySpark, PyArrow, pandas)
     "FluxTableWriter",
     "TableExistsError",
+    "CommitConflictError",
+    "ConcurrentOperationError",
+    "LogForkError",
+    "ProtocolVersionError",
+    "FLUX_TABLE_READER_VERSION",
+    "FLUX_TABLE_WRITER_VERSION",
     # Batch reader
     "FluxBatchReader",
     # Submodules
