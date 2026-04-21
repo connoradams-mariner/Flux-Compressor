@@ -59,6 +59,14 @@ from fluxcompress._fluxcompress import (  # noqa: F401
     FileInfo,
     FluxBuffer,
     FluxBatchReader,
+    # Stateful writer with dict cache
+    FluxWriter,
+    # Phase F: schema-evolution classes
+    SchemaField,
+    TableSchema,
+    EvolveOptions,
+    FluxScan,
+    FluxTable,
     # Core functions
     compress,
     decompress,
@@ -105,6 +113,14 @@ __all__ = [
     "BlockInfo",
     "FileInfo",
     "FluxBuffer",
+    # Stateful writer with dict cache
+    "FluxWriter",
+    # Phase F: schema-evolution classes
+    "SchemaField",
+    "TableSchema",
+    "EvolveOptions",
+    "FluxScan",
+    "FluxTable",
     # Core functions
     "compress",
     "decompress",

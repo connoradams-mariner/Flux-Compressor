@@ -30,6 +30,7 @@ serde_json.workspace  = true
 thiserror.workspace   = true
 anyhow.workspace      = true
 tracing.workspace     = true
+brotli                = { version = "3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 criterion.workspace   = true
@@ -37,6 +38,14 @@ tempfile              = "3"
 
 [[bench]]
 name    = "bit_slab"
+harness = false
+
+[[bench]]
+name    = "fluxtable"
+harness = false
+
+[[bench]]
+name    = "predicate_eval"
 harness = false
 
 [[example]]

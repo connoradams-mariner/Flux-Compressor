@@ -11,8 +11,11 @@ Or for a quick comparison vs raw bytes:
     pytest python/tests/test_benchmarks.py --benchmark-only --benchmark-compare
 """
 
+import tempfile
+
 import pyarrow as pa
 import pytest
+
 import fluxcompress as fc
 
 
@@ -97,6 +100,90 @@ def test_bench_predicate_pushdown(benchmark):
 
     result = benchmark(fc.decompress, buf, predicate=pred)
     assert len(result) > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Compression ratio report (not a timing benchmark, but useful to log)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase F: FluxTable API benchmarks
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_schema_v1() -> fc.TableSchema:
+    return fc.TableSchema([
+        fc.SchemaField(1, "value", "uint64"),
+    ])
+
+
+def _make_schema_v2() -> fc.TableSchema:
+    return fc.TableSchema([
+        fc.SchemaField(1, "value", "uint64"),
+        fc.SchemaField(2, "tag",   "int64"),
+    ])
+
+
+@pytest.mark.parametrize("n", [1_024, 65_536])
+def test_bench_fluxtable_append(benchmark, n, tmp_path):
+    """Benchmark FluxTable.append() — compress + log entry + file write."""
+    table = _sequential(n)
+    buf   = fc.compress(table)
+
+    tbl = fc.FluxTable(str(tmp_path / "t.fluxtable"))
+    tbl.evolve_schema(_make_schema_v1())
+    # Pre-warm: one append before benchmarking so we're not in cold-start I/O.
+    tbl.append(buf)
+
+    benchmark(tbl.append, buf)
+
+
+@pytest.mark.parametrize("n,num_files", [(65_536, 4), (1_024, 16)])
+def test_bench_fluxtable_scan(benchmark, n, num_files, tmp_path):
+    """Benchmark FluxTable.scan() — streaming read over N files."""
+    table = _sequential(n)
+    buf   = fc.compress(table)
+
+    tbl = fc.FluxTable(str(tmp_path / "t.fluxtable"))
+    tbl.evolve_schema(_make_schema_v1())
+    for _ in range(num_files):
+        tbl.append(buf)
+
+    def _do_scan() -> int:
+        return sum(b.num_rows for b in tbl.scan())
+
+    result = benchmark(_do_scan)
+    assert result == n * num_files
+
+
+def test_bench_fluxtable_evolve_schema(benchmark, tmp_path):
+    """
+    Benchmark FluxTable.evolve_schema() — pure metadata write (JSON log entry).
+
+    A fresh table directory is created for each iteration so log-read overhead
+    doesn't accumulate across rounds.
+    """
+    counter = [0]
+
+    def _do_evolve() -> None:
+        tbl = fc.FluxTable(str(tmp_path / f"t{counter[0]}.fluxtable"))
+        counter[0] += 1
+        tbl.evolve_schema(_make_schema_v1())
+        tbl.evolve_schema(_make_schema_v2())
+
+    benchmark(_do_evolve)
+
+
+@pytest.mark.parametrize("n", [1_024, 65_536])
+def test_bench_compress_and_append(benchmark, n, tmp_path):
+    """End-to-end: compress a batch then append it to a FluxTable."""
+    table = _sequential(n)
+    tbl   = fc.FluxTable(str(tmp_path / "t.fluxtable"))
+    tbl.evolve_schema(_make_schema_v1())
+
+    def _do_compress_and_append() -> None:
+        tbl.append(fc.compress(table))
+
+    benchmark(_do_compress_and_append)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

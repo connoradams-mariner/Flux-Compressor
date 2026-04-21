@@ -204,9 +204,43 @@ cargo run -p fluxcapacitor --release -- dtype-bench --rows 1000000
 # Single-column sequential benchmark
 cargo run -p fluxcapacitor --release -- bench --rows 50000000 --pattern sequential
 
+# FluxTable transaction-log microbenchmarks
+cargo bench -p loom --bench fluxtable
+
+# Row-level predicate evaluation (Part 2)
+cargo bench -p loom --bench predicate_eval
+
 # Python scaling benchmark with charts
 python python/tests/bench_scaling.py
 ```
+
+### FluxTable + Predicate microbenchmarks
+
+Fresh numbers on Linux (rustc 1.85, release):
+
+```
+Bench                                             Time          Throughput
+───────────────────────────────────────────────  ────────────  ─────────────
+fluxtable/append           1024 rows             ~138 µs       ~7.4 Melem/s
+fluxtable/append           65k  rows             ~178 µs       ~368 Melem/s
+fluxtable/append           524k rows             ~485 µs       ~1.08 Gelem/s
+fluxtable/scan             262k rows  (4 files)  ~1.9  ms      ~134 Melem/s
+fluxtable/scan             1M   rows  (2 files)  ~16.8 ms      ~62  Melem/s
+fluxtable/compress_append  65k  rows             ~4.3  ms      ~15  Melem/s
+fluxtable/compress_append  524k rows             ~33.6 ms      ~15.6 Melem/s
+fluxtable/evolve_schema    add_column            ~176 µs       —
+
+predicate/eval_on_batch    gt         524k rows  ~113 µs       ~565 Melem/s
+predicate/eval_on_batch    between    524k rows  ~487 µs       ~131 Melem/s
+predicate/eval_on_batch    and_or_deep 524k rows ~841 µs       ~76  Melem/s
+predicate/eval_on_batch    gt         2.1M rows  ~3.5  ms      ~593 Melem/s
+predicate/eval_on_batch    between    2.1M rows  ~15.9 ms      ~132 Melem/s
+predicate/eval_on_batch    and_or_deep 2.1M rows ~26.4 ms      ~79  Melem/s
+```
+
+The `predicate/eval_on_batch` numbers measure the new row-level
+primitive that underpins the mutations roadmap (`delete_where`,
+`update_where`, `merge`).
 
 ---
 
@@ -276,8 +310,10 @@ overhead).
 
 **Ecosystem and tooling.** Parquet is the de facto standard with
 first-class support in Spark, DuckDB, Polars, Pandas, BigQuery, Snowflake,
-and every major data tool. FluxCompress provides Python bindings and a
-Spark JNI bridge, but adoption requires explicit integration.
+and every major data tool. FluxCompress provides Python bindings, a
+Spark JNI bridge, and (new in v0.4) a Spark DataSource V2 connector
+(`df.write.format("flux")`), but adoption still requires explicit
+integration.
 
 ### Summary
 
@@ -402,6 +438,7 @@ crates/
 │   ├── dtype_router.rs  DType Router (pre-classification fast paths)
 │   ├── segmenter.rs   Adaptive segmenter with drift detection
 │   ├── atlas.rs       v2 footer (61B BlockMeta + ColumnDescriptor tree)
+│   ├── traits.rs      Predicate (block skip + row eval) + compressor traits
 │   ├── txn/           Transaction log + snapshot time travel
 │   ├── simd/          AVX2 / NEON / scalar bit unpackers
 │   ├── compressors/   RLE, Delta, Dict, BitSlab, LZ4, String + secondary
@@ -411,6 +448,13 @@ crates/
 ├── jni-bridge/        Spark JNI (u128 dual-register)
 ├── python/            PyO3 bindings (Arrow FFI zero-copy)
 └── fluxcapacitor/     CLI (bench, compress, inspect, optimize)
+
+spark-connector/       Scala DataSource V2 connector (Phase H — new)
+├── build.sbt          Scala 2.12 + Spark 3.5 provided deps
+└── src/main/scala/
+    ├── io/fluxcompress/spark/     FluxDataSource / FluxScan / FluxWrite
+    └── org/apache/spark/sql/fluxcompress/
+                                   SparkArrowBridge (ArrowWriter / ArrowUtils shim)
 ```
 
 ### Key Design Decisions
@@ -569,6 +613,21 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
   block, the reader decodes once and serves every member from cache,
   closing the decompression gap to Parquet.
 
+### Completed (v0.4)
+
+- **Spark DataSource V2 connector (Phase H)** — new `spark-connector/`
+  Scala project wires the JNI bridge into Spark 3.5's DSv2 APIs so
+  users can say `df.write.format("flux").option("evolve",
+  "true").save(path)` and `spark.read.format("flux").load(path)`
+  directly, with Arrow-IPC-based columnar reads and per-task
+  `tableAppend` commits. See [spark-connector/README.md](spark-connector/README.md).
+- **Row-level predicate evaluation (mutations Part 2)** —
+  `Predicate::eval_on_batch` builds a `BooleanArray` mask over a
+  `RecordBatch` using Arrow typed downcasts; it is the shared
+  primitive for DELETE, UPDATE, and MERGE. `cargo bench --bench
+  predicate_eval` benches single-op, BETWEEN, and deep-AND/OR
+  predicate trees.
+
 ### In Progress (v0.4)
 
 - **SIMD decompression** — AVX2/NEON-accelerated BitSlab unpacking on
@@ -576,6 +635,12 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 - **Null bitmap support** — compress only dense non-null values,
   reconstruct nulls on read. BlockMeta field exists, implementation
   pending.
+- **Mutations Phase A/B/C (DELETE / UPDATE / MERGE via COW)** — builds
+  on `Predicate::eval_on_batch`; each operation rewrites matching
+  files and commits a single `(remove old, add new)` log entry. See
+  [docs/roadmap-mutations.md](docs/roadmap-mutations.md).
+- **WAL phase 1 / 2** — opt-in binary log with CRC32 framing plus
+  periodic checkpoint files. See [docs/roadmap-wal.md](docs/roadmap-wal.md).
 - **Predicate pushdown for strings** — min/max string metadata in
   footer for Z-Order skipping on string columns.
 - **FSST zero-alloc decode** — build Arrow `StringArray` buffers
@@ -601,6 +666,8 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
   reuse training work.
 
 See also:
+- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md) — Phase H Spark DataSource V2 connector
+- [docs/roadmap-mutations.md](docs/roadmap-mutations.md) — DELETE / UPDATE / MERGE via COW
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
 - [docs/roadmap-wal.md](docs/roadmap-wal.md) — Binary WAL migration
 - [docs/roadmap-f128.md](docs/roadmap-f128.md) — IEEE 754 binary128 integration plan

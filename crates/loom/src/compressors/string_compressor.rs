@@ -44,12 +44,58 @@ use arrow_array::{ArrayRef, StringArray, BinaryArray, LargeStringArray, LargeBin
 use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
 use crate::dtype::FluxDType;
 use crate::error::{FluxError, FluxResult};
 use crate::CompressionProfile;
+
+// ── Brotli helpers ────────────────────────────────────────────────────────────
+
+/// Brotli compression quality.  Quality 9 gives the best ratio on text;
+/// it is always used here because large columns are split into parallel
+/// sub-blocks (see `brotli_parallel_threshold`) which recover write speed
+/// without sacrificing quality.
+const BROTLI_QUALITY: u32 = 9;
+/// Window size: 2^22 = 4 MB.  Captures long-range repetitions across many
+/// short strings (e.g. shared path prefixes, repeated NL phrases).
+const BROTLI_LGWIN: u32 = 22;
+/// Minimum sub-block size for parallel Brotli: blocks smaller than this have
+/// too much rayon task-dispatch overhead relative to useful Brotli work.
+const BROTLI_PAR_BLOCK_MIN: usize = 256 * 1024;   // 256 KB
+/// Maximum sub-block size for parallel Brotli: blocks larger than this mean
+/// a small column only spawns 1-2 tasks, leaving most cores idle.
+const BROTLI_PAR_BLOCK_MAX: usize = 1_048_576;    // 1 MB
+
+/// Compress `data` with Brotli quality 9 / 4 MB window.
+///
+/// Large string columns call this once per rayon sub-block (each ~1 MB)
+/// so that the per-column write throughput scales with core count rather
+/// than being limited to a single-threaded 10-20 MB/s.
+pub(crate) fn brotli_compress(data: &[u8]) -> FluxResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    {
+        let mut w = brotli::CompressorWriter::new(
+            &mut out,
+            4096,
+            BROTLI_QUALITY,
+            BROTLI_LGWIN,
+        );
+        w.write_all(data)
+            .map_err(|e| FluxError::Internal(format!("brotli compress: {e}")))?;
+    }
+    Ok(out)
+}
+
+/// Decompress a Brotli-compressed byte slice.
+pub(crate) fn brotli_decompress(data: &[u8]) -> FluxResult<Vec<u8>> {
+    let mut out = Vec::new();
+    brotli::Decompressor::new(data, 4096)
+        .read_to_end(&mut out)
+        .map_err(|e| FluxError::Internal(format!("brotli decompress: {e}")))?;
+    Ok(out)
+}
 
 /// Strategy byte tag for String/Binary blocks.
 pub const TAG: u8 = 0x06;
@@ -71,7 +117,13 @@ const SUB_FSST_ZSTD: u8 = 10;
 const SUB_RAW_ZSTD_DICT: u8 = 11;
 /// FSST-transformed data + Zstd with a trained dictionary (Archive profile only).
 const SUB_FSST_ZSTD_DICT: u8 = 12;
-/// Front-coded path for sorted / near-sorted columns. Stores each row as
+/// Front-coded path: codec byte inside the block selects LZ4(1)/Zstd(2)/Brotli(3).
+// (SUB_FRONT_CODED = 13 is defined below, codec byte distinguishes the codec.)
+/// Raw data + Brotli compression on offsets + data (Brotli profile).
+const SUB_RAW_BROTLI: u8 = 16;
+/// FSST-transformed data + Brotli on the code stream (Brotli profile).
+const SUB_FSST_BROTLI: u8 = 17;
+/// Front-coded path for sorted / near-sorted columns.
 /// `[varint shared_prefix_len][varint suffix_len][suffix_bytes]`, then feeds
 /// the resulting bytestream through the profile's secondary codec. Offsets
 /// are implicit (recovered while decoding) so we skip the offset column
@@ -130,8 +182,17 @@ const FSST_PROBE_STRINGS: usize = 1024;
 /// Minimum FSST compression ratio (on the probe) required to keep FSST.
 const FSST_MIN_RATIO: f64 = 1.25;
 
+/// Zstd compression level used for string columns in the Archive / dict paths.
+/// Level 9 gives ~2× better ratio than level 3 on typical text/structured
+/// string data at ~6× the CPU cost — still far cheaper than Brotli quality 9.
+/// Numeric blocks in flux_writer.rs intentionally stay at level 3 because
+/// bit-packed data is already near-incompressible at that level.
+const ZSTD_STRING_LEVEL: i32 = 9;
+
 /// Minimum column byte size at which a trained zstd dictionary amortises.
-const ZSTD_DICT_MIN_BYTES: usize = 2 * 1024 * 1024;
+/// Lowered from 2 MB so path/session-id columns (~1 MB at 65 K rows) also
+/// benefit from per-column dictionary training.
+const ZSTD_DICT_MIN_BYTES: usize = 512 * 1024; // 512 KB
 /// Target zstd dictionary size (zstd picks optimal up to this cap).
 const ZSTD_DICT_MAX_SIZE: usize = 112 * 1024;
 /// Sample target size for zstd dict training.
@@ -262,6 +323,94 @@ pub fn compress_array_with_profile(
     compress_strings_with_profile(&strings, profile)
 }
 
+/// Train a compact Zstd dictionary from a string/binary array for the
+/// stateful `FluxWriter` cache.
+///
+/// Uses an **8 KB** target rather than the full `ZSTD_DICT_MAX_SIZE` (112 KB)
+/// so that the per-block storage overhead is negligible when the same dictionary
+/// is embedded in every batch written to a streaming table.  8 KB is enough to
+/// capture common vocabulary patterns and close ~80% of the gap between Zstd
+/// levels 3 and 9 for template-generated or domain-specific text.
+///
+/// Returns `None` when the column is too small to benefit (< `ZSTD_DICT_MIN_BYTES`)
+/// or when training fails.
+pub fn train_dict_from_array(array: &dyn Array) -> Option<Vec<u8>> {
+    /// Compact target size: small enough to be stored in every batch without
+    /// materially inflating the compressed file size.
+    const CACHED_DICT_MAX_SIZE: usize = 8 * 1024; // 8 KB
+
+    let strings = extract_strings(array).ok()?;
+    let total_bytes: usize = strings.iter().map(|v| v.len()).sum();
+    if total_bytes < ZSTD_DICT_MIN_BYTES {
+        return None;
+    }
+    // Sample evenly (reuse the same logic as train_zstd_dict but with
+    // CACHED_DICT_MAX_SIZE so we don’t need to expose the private helper).
+    let stride = (strings.len() / 2048).max(1);
+    let mut sample: Vec<&[u8]> = Vec::new();
+    let mut bytes = 0usize;
+    let mut i = 0;
+    while i < strings.len() && bytes < ZSTD_DICT_TRAIN_BYTES {
+        sample.push(strings[i]);
+        bytes += strings[i].len();
+        i += stride;
+    }
+    if sample.len() < 32 {
+        return None;
+    }
+    zstd::dict::from_samples(&sample, CACHED_DICT_MAX_SIZE).ok()
+}
+
+/// Compression level used for the dictionary cache hot path.
+/// Level 5 is ~3× faster than level 9 while producing better output than
+/// level 3 — a good balance when the same data shape is written repeatedly.
+const CACHED_DICT_COMPRESS_LEVEL: i32 = 5;
+
+/// Compress a string/binary array using a pre-trained Zstd dictionary.
+///
+/// Uses Zstd **level 5** (balanced speed/ratio) rather than `ZSTD_STRING_LEVEL`
+/// (9) because the trained dictionary compensates for the lower level, achieving
+/// near-level-9 ratio at ~3× the write throughput.  Always produces a
+/// `SUB_RAW_ZSTD_DICT` block, skipping the FSST bakeoff — the dict already
+/// captures column-specific vocabulary patterns that FSST would otherwise
+/// exploit.
+pub fn compress_array_with_cached_dict(
+    array: &dyn Array,
+    dict: &[u8],
+) -> FluxResult<Vec<u8>> {
+    use std::io::Write as _;
+    let strings = extract_strings(array)?;
+    let total_bytes: usize = strings.iter().map(|v| v.len()).sum();
+    let mut offsets: Vec<u64> = Vec::with_capacity(strings.len() + 1);
+    let mut data_buf: Vec<u8> = Vec::with_capacity(total_bytes);
+    offsets.push(0);
+    for &v in &strings {
+        data_buf.extend_from_slice(v);
+        offsets.push(data_buf.len() as u64);
+    }
+    // Offsets through the Loom pipeline (DeltaDelta → BitSlab).
+    let offsets_block = compress_index_column(&offsets, CompressionProfile::Archive)?;
+    // Data compressed with the cached dict.
+    let mut c = zstd::bulk::Compressor::with_dictionary(CACHED_DICT_COMPRESS_LEVEL, dict)
+        .map_err(|e| FluxError::Internal(format!("zstd cached dict enc: {e}")))?;
+    let cd = c.compress(&data_buf)
+        .map_err(|e| FluxError::Internal(format!("zstd cached dict compress: {e}")))?;
+
+    let mut buf = Vec::with_capacity(
+        1 + 1 + 4 + 4 + dict.len() + 4 + offsets_block.len() + 4 + cd.len()
+    );
+    buf.write_u8(TAG)?;
+    buf.write_u8(SUB_RAW_ZSTD_DICT)?;
+    buf.write_u32::<LittleEndian>(strings.len() as u32)?;
+    buf.write_u32::<LittleEndian>(dict.len() as u32)?;
+    buf.extend_from_slice(dict);
+    buf.write_u32::<LittleEndian>(offsets_block.len() as u32)?;
+    buf.extend_from_slice(&offsets_block);
+    buf.write_u32::<LittleEndian>(cd.len() as u32)?;
+    buf.extend_from_slice(&cd);
+    Ok(buf)
+}
+
 /// Compress a slice of byte slices with a specific profile.
 pub fn compress_strings_with_profile(
     values: &[&[u8]],
@@ -278,6 +427,39 @@ pub fn compress_strings_with_profile(
     // cardinality, and doubles as a streaming checkpoint.
     if count > SUB_BLOCK_SPLIT_THRESHOLD {
         return compress_multi(values, profile);
+    }
+
+    // Brotli on byte-heavy columns: force fine-grained sub-block splitting
+    // to expose rayon parallelism.  At quality 9, Brotli runs at ~15-25 MB/s
+    // single-threaded; a 12 MB survey-comment column would take ~500 ms.
+    // Splitting into ~1 MB sub-blocks and compressing them in parallel
+    // recovers write throughput proportionally to available cores while
+    // keeping quality 9 (each 1 MB block fits inside the 4 MB Brotli window
+    // so back-reference quality is not degraded).
+    //
+    // Recursion safety: sub-blocks are ≤ BROTLI_PAR_BLOCK_BYTES bytes, so
+    // the re-entrant call into compress_strings_with_profile will not trigger
+    // this branch again.
+    if matches!(profile, CompressionProfile::Brotli) && count > 1024 {
+        let total_bytes: usize = values.iter().map(|v| v.len()).sum();
+        // Only split when the column is larger than BROTLI_PAR_BLOCK_MAX (1 MB).
+        // This ensures sub-blocks are always ≤ 1 MB and never re-trigger this
+        // branch — preventing cascading recursion that would create too many
+        // tiny blocks and degrade both ratio and rayon efficiency.
+        //
+        // With this guard a 12 MB comment column on a 16-core machine splits
+        // into 16 × 750 KB blocks (all run in 1 rayon round); a 1.7 MB path
+        // column splits into max(7, 2) blocks of ~240 KB each.  Sub-blocks
+        // of 240–750 KB are still well within the 4 MB Brotli window.
+        if total_bytes > BROTLI_PAR_BLOCK_MAX {
+            let n_threads = rayon::current_num_threads().max(1);
+            let block_bytes = (total_bytes / n_threads)
+                .max(BROTLI_PAR_BLOCK_MIN)
+                .min(BROTLI_PAR_BLOCK_MAX);
+            let n_blocks = ((total_bytes + block_bytes - 1) / block_bytes).max(2);
+            let rows_per_block = ((count + n_blocks - 1) / n_blocks).max(256);
+            return compress_multi_impl(values, profile, rows_per_block);
+        }
     }
 
     // Sortedness probe + bakeoff: front coding is a massive win on
@@ -388,13 +570,15 @@ fn compress_high_cardinality(
         fsst_flat.extend_from_slice(v);
     }
 
-    // Probe secondary-codec sizes.
-    let use_zstd = matches!(profile, CompressionProfile::Archive);
-    let raw_secondary_len = secondary_size(&raw_flat, use_zstd)?;
-    let fsst_secondary_len = secondary_size(&fsst_flat, use_zstd)?;
+    // Probe secondary-codec sizes.  The probe must use the same codec the full
+    // column will use so that FSST-vs-raw decisions are consistent.
+    let raw_secondary_len  = secondary_size(&raw_flat,  profile)?;
+    let fsst_secondary_len = secondary_size(&fsst_flat, profile)?;
 
     // For Archive, optionally train a zstd dictionary and check whether
     // dict-compressed probe beats plain zstd by a healthy margin.
+    // Brotli profile skips dict training — it uses Brotli directly.
+    let use_zstd = matches!(profile, CompressionProfile::Archive);
     let zstd_dict: Option<Vec<u8>> = if use_zstd && total_bytes >= ZSTD_DICT_MIN_BYTES {
         train_zstd_dict(values).ok()
     } else {
@@ -463,7 +647,7 @@ fn train_zstd_dict(values: &[&[u8]]) -> FluxResult<Vec<u8>> {
 
 /// Compress `bytes` with zstd using the trained `dict`, return only the size.
 fn zstd_with_dict_size(bytes: &[u8], dict: &[u8]) -> FluxResult<usize> {
-    let mut c = zstd::bulk::Compressor::with_dictionary(3, dict)
+    let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
     let out = c.compress(bytes)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
@@ -471,13 +655,26 @@ fn zstd_with_dict_size(bytes: &[u8], dict: &[u8]) -> FluxResult<usize> {
 }
 
 /// Estimate the size of `bytes` after the profile's secondary codec.
-fn secondary_size(bytes: &[u8], use_zstd: bool) -> FluxResult<usize> {
-    if use_zstd {
-        zstd::stream::encode_all(bytes, 3)
-            .map(|v| v.len())
-            .map_err(|e| FluxError::Internal(format!("zstd probe: {e}")))
-    } else {
-        Ok(lz4_flex::compress_prepend_size(bytes).len())
+/// Used in bakeoff probes — the codec must match what `compress_fsst` /
+/// `compress_raw` will actually apply to the full column.
+fn secondary_size(bytes: &[u8], profile: CompressionProfile) -> FluxResult<usize> {
+    match profile.secondary_codec() {
+        crate::SecondaryCodec::Zstd => {
+            zstd::stream::encode_all(bytes, ZSTD_STRING_LEVEL)
+                .map(|v| v.len())
+                .map_err(|e| FluxError::Internal(format!("zstd probe: {e}")))
+        }
+        crate::SecondaryCodec::Brotli => {
+            // Use fast Zstd as a proxy for the bakeoff probe.  The FSST-vs-raw
+            // decision correlates well across codecs — if FSST beats raw under
+            // Zstd it will beat raw under Brotli too.  Avoiding actual Brotli
+            // here saves ~12 ms per sub-block of overhead that was swamping
+            // the parallelism benefit on large string columns.
+            zstd::stream::encode_all(bytes, 3)
+                .map(|v| v.len())
+                .map_err(|e| FluxError::Internal(format!("zstd proxy probe: {e}")))
+        }
+        _ => Ok(lz4_flex::compress_prepend_size(bytes).len()),
     }
 }
 
@@ -525,7 +722,7 @@ fn maybe_front_coded_wins(
     for &v in probe {
         raw_flat.extend_from_slice(v);
     }
-    let raw_secondary = secondary_size(&raw_flat, matches!(profile, CompressionProfile::Archive))?;
+    let raw_secondary = secondary_size(&raw_flat, profile)?;
 
     if (fc_probe.len() as f64) < (raw_secondary as f64) * 0.95 {
         Ok(Some(compress_front_coded(values, profile)?))
@@ -590,10 +787,14 @@ fn compress_front_coded(values: &[&[u8]], profile: CompressionProfile) -> FluxRe
         prev = cur;
     }
 
-    // Secondary codec. Speed/Balanced use LZ4; Archive uses Zstd.
+    // Secondary codec: LZ4(1) for Speed/Balanced, Zstd(2) for Archive, Brotli(3) for Brotli.
     let (compressed, codec_byte) = match profile {
+        CompressionProfile::Brotli => {
+            let c = brotli_compress(payload.as_slice())?;
+            (c, 3u8)
+        }
         CompressionProfile::Archive => {
-            let c = zstd::stream::encode_all(payload.as_slice(), 3)
+            let c = zstd::stream::encode_all(payload.as_slice(), ZSTD_STRING_LEVEL)
                 .map_err(|e| FluxError::Internal(format!("zstd front-coded: {e}")))?;
             (c, 2u8)
         }
@@ -657,28 +858,38 @@ fn decompress_front_coded(
 
 /// Split `values` into fixed-row-count sub-blocks, compress each in parallel
 /// through the full adaptive pipeline, and emit a `SUB_MULTI` container.
+/// Uses `SUB_BLOCK_ROWS` per sub-block (the standard large-column path).
 fn compress_multi(
     values: &[&[u8]],
     profile: CompressionProfile,
 ) -> FluxResult<Vec<u8>> {
+    compress_multi_impl(values, profile, SUB_BLOCK_ROWS)
+}
+
+/// Core SUB_MULTI implementation: split into sub-blocks of exactly
+/// `rows_per_block` rows, compress in parallel, wrap in SUB_MULTI container.
+///
+/// Called with `SUB_BLOCK_ROWS` for the standard large-column path and with
+/// a computed smaller value for the Brotli parallel-compression path.
+fn compress_multi_impl(
+    values: &[&[u8]],
+    profile: CompressionProfile,
+    rows_per_block: usize,
+) -> FluxResult<Vec<u8>> {
     use rayon::prelude::*;
 
-    // Partition into sub-blocks of roughly `SUB_BLOCK_ROWS` rows. Using a
-    // Vec<&[&[u8]]> of views so we don't copy any bytes.
-    let chunks: Vec<&[&[u8]]> = values.chunks(SUB_BLOCK_ROWS).collect();
+    let chunks: Vec<&[&[u8]]> = values.chunks(rows_per_block).collect();
+    let n = chunks.len();
 
-    // Compress each sub-block in parallel. Each call recursively dispatches
-    // through the normal adaptive pipeline — `count` for a single sub-block
-    // is <= SUB_BLOCK_SPLIT_THRESHOLD so we won't infinitely recurse.
+    // Compress each sub-block in parallel through the normal adaptive pipeline.
     let sub_blocks: FluxResult<Vec<Vec<u8>>> = chunks
         .into_par_iter()
         .map(|chunk| compress_strings_with_profile(chunk, profile))
         .collect();
     let sub_blocks = sub_blocks?;
 
-    // Assemble the container.
+    // Assemble the SUB_MULTI container.
     let total_inner: usize = sub_blocks.iter().map(|b| b.len()).sum();
-    let n = sub_blocks.len();
     let mut buf: Vec<u8> = Vec::with_capacity(1 + 1 + 4 + 4 + n * 8 + total_inner);
     buf.write_u8(TAG)?;
     buf.write_u8(SUB_MULTI)?;
@@ -686,18 +897,15 @@ fn compress_multi(
     buf.write_u32::<LittleEndian>(n as u32)?;
     // Sub-block index: (row_count, block_len) pairs so the reader can
     // skip / mmap-slice without decoding.
-    let mut offset = 0usize;
     for (chunk_idx, block) in sub_blocks.iter().enumerate() {
         let rows = if chunk_idx + 1 == n {
-            values.len() - chunk_idx * SUB_BLOCK_ROWS
+            values.len() - chunk_idx * rows_per_block
         } else {
-            SUB_BLOCK_ROWS
+            rows_per_block
         };
         buf.write_u32::<LittleEndian>(rows as u32)?;
         buf.write_u32::<LittleEndian>(block.len() as u32)?;
-        offset += block.len();
     }
-    let _ = offset;
     for block in &sub_blocks {
         buf.extend_from_slice(block);
     }
@@ -864,18 +1072,20 @@ fn compress_fsst(
     }
 
     let offsets_block = compress_index_column(&offsets, profile)?;
-    let use_zstd = matches!(profile, CompressionProfile::Archive);
-    let (cd, sub) = if use_zstd {
-        (
-            zstd::stream::encode_all(data_buf.as_slice(), 3)
+    let (cd, sub) = match profile {
+        CompressionProfile::Brotli => (
+            brotli_compress(data_buf.as_slice())?,
+            SUB_FSST_BROTLI,
+        ),
+        CompressionProfile::Archive => (
+            zstd::stream::encode_all(data_buf.as_slice(), ZSTD_STRING_LEVEL)
                 .map_err(|e| FluxError::Internal(format!("zstd fsst data: {e}")))?,
             SUB_FSST_ZSTD,
-        )
-    } else {
-        (
+        ),
+        _ => (
             lz4_flex::compress_prepend_size(&data_buf),
             SUB_FSST_LZ4,
-        )
+        ),
     };
 
     let table = serialize_fsst_table(compressor);
@@ -911,7 +1121,7 @@ fn compress_raw_with_dict(values: &[&[u8]], dict: Vec<u8>) -> FluxResult<Vec<u8>
     }
 
     let offsets_block = compress_index_column(&offsets, CompressionProfile::Archive)?;
-    let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict)
+    let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, &dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
     let cd = c.compress(&data_buf)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
@@ -954,7 +1164,7 @@ fn compress_fsst_with_dict(
     }
 
     let offsets_block = compress_index_column(&offsets, CompressionProfile::Archive)?;
-    let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict)
+    let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, &dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
     let cd = c.compress(&data_buf)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
@@ -993,18 +1203,20 @@ fn compress_raw(values: &[&[u8]], profile: CompressionProfile) -> FluxResult<Vec
     // Offsets: Loom pipeline (adaptive segment + classifier + outlier patching).
     let offsets_block = compress_index_column(&offsets, profile)?;
 
-    let use_zstd = matches!(profile, CompressionProfile::Archive);
-    let (cd, sub) = if use_zstd {
-        (
-            zstd::stream::encode_all(data_buf.as_slice(), 3)
+    let (cd, sub) = match profile {
+        CompressionProfile::Brotli => (
+            brotli_compress(data_buf.as_slice())?,
+            SUB_RAW_BROTLI,
+        ),
+        CompressionProfile::Archive => (
+            zstd::stream::encode_all(data_buf.as_slice(), ZSTD_STRING_LEVEL)
                 .map_err(|e| FluxError::Internal(format!("zstd data: {e}")))?,
             SUB_RAW_ZSTD,
-        )
-    } else {
-        (
+        ),
+        _ => (
             lz4_flex::compress_prepend_size(&data_buf),
             SUB_RAW_LZ4,
-        )
+        ),
     };
 
     let mut buf = Vec::new();
@@ -1044,10 +1256,12 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<Vec<u8>>, usize)> {
         SUB_DICT => decompress_dict(&mut cur, string_count),
         SUB_RAW_LZ4_LEGACY  => decompress_raw_legacy(&mut cur, string_count, false),
         SUB_RAW_ZSTD_LEGACY => decompress_raw_legacy(&mut cur, string_count, true),
-        SUB_RAW_LZ4  => decompress_raw_v2(&mut cur, string_count, false),
-        SUB_RAW_ZSTD => decompress_raw_v2(&mut cur, string_count, true),
-        SUB_FSST_LZ4  => decompress_fsst(&mut cur, string_count, false),
-        SUB_FSST_ZSTD => decompress_fsst(&mut cur, string_count, true),
+        SUB_RAW_LZ4    => decompress_raw_v2(&mut cur, string_count, false),
+        SUB_RAW_ZSTD   => decompress_raw_v2(&mut cur, string_count, true),
+        SUB_RAW_BROTLI => decompress_raw_brotli(&mut cur, string_count),
+        SUB_FSST_LZ4    => decompress_fsst(&mut cur, string_count, false),
+        SUB_FSST_ZSTD   => decompress_fsst(&mut cur, string_count, true),
+        SUB_FSST_BROTLI => decompress_fsst_brotli(&mut cur, string_count),
         SUB_RAW_ZSTD_DICT  => decompress_raw_zstd_dict(&mut cur, string_count),
         SUB_FSST_ZSTD_DICT => decompress_fsst_zstd_dict(&mut cur, string_count),
         SUB_FRONT_CODED    => decompress_front_coded(&mut cur, string_count),
@@ -1304,12 +1518,175 @@ fn read_zstd_dict<'a>(cur: &mut Cursor<&'a [u8]>) -> FluxResult<&'a [u8]> {
 fn zstd_decompress_with_dict(bytes: &[u8], dict: &[u8]) -> FluxResult<Vec<u8>> {
     let mut d = zstd::bulk::Decompressor::with_dictionary(dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict dec: {e}")))?;
-    // Upper bound for the output buffer: zstd embeds the frame size when
-    // input was a single call to bulk::Compressor::compress (which we did).
-    // Use 32x expansion as a safety cap; bulk API respects the frame size.
-    let cap = bytes.len().saturating_mul(32).max(1 << 20);
+    // Query the exact decompressed size from the Zstd frame header.
+    // zstd::bulk::Compressor always writes a frame with content size embedded,
+    // so this should return Some(n) in practice.  With Zstd level 9 + a
+    // trained dictionary, template-generated text can achieve 100-500×
+    // compression; using the actual size avoids both over-allocation and the
+    // previous 32× cap that failed at extreme ratios.
+    let cap = zstd::zstd_safe::get_frame_content_size(bytes)
+        .ok()
+        .flatten()
+        .and_then(|s| usize::try_from(s).ok())
+        .unwrap_or_else(|| bytes.len().saturating_mul(512).max(1 << 20));
     d.decompress(bytes, cap)
         .map_err(|e| FluxError::Internal(format!("zstd dict decompress: {e}")))
+}
+
+// ── Brotli decode paths ─────────────────────────────────────────────────────────────────
+
+/// Raw + Brotli decode: reads offsets (Loom pipeline) + Brotli-compressed data.
+fn decompress_raw_brotli(
+    cur: &mut Cursor<&[u8]>,
+    count: usize,
+) -> FluxResult<(Vec<Vec<u8>>, usize)> {
+    let off_len = cur.read_u32::<LittleEndian>()? as usize;
+    let off_start = cur.position() as usize;
+    let offsets = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    cur.set_position((off_start + off_len) as u64);
+
+    let cd_len = cur.read_u32::<LittleEndian>()? as usize;
+    let cd_start = cur.position() as usize;
+    let data_buf = brotli_decompress(&cur.get_ref()[cd_start..cd_start + cd_len])?;
+
+    if offsets.len() != count + 1 {
+        return Err(FluxError::InvalidFile(format!(
+            "raw_brotli offsets length {} != count+1 {}", offsets.len(), count + 1,
+        )));
+    }
+    let mut strings = Vec::with_capacity(count);
+    for i in 0..count {
+        let s = offsets[i] as usize;
+        let e = offsets[i + 1] as usize;
+        if e > data_buf.len() || s > e {
+            return Err(FluxError::InvalidFile("raw_brotli offsets out of range".into()));
+        }
+        strings.push(data_buf[s..e].to_vec());
+    }
+    Ok((strings, cd_start + cd_len))
+}
+
+/// FSST + Brotli decode.
+fn decompress_fsst_brotli(
+    cur: &mut Cursor<&[u8]>,
+    count: usize,
+) -> FluxResult<(Vec<Vec<u8>>, usize)> {
+    // Re-use the FSST buffer decoder but pass `use_zstd = false` so it uses
+    // LZ4 for the secondary decode — then we override with Brotli below.
+    // Actually we need a custom path since decode_fsst_buffers is LZ4/Zstd only.
+    let table_len = cur.read_u16::<LittleEndian>()? as usize;
+    let table_start = cur.position() as usize;
+    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    cur.set_position((table_start + table_len) as u64);
+
+    let off_len = cur.read_u32::<LittleEndian>()? as usize;
+    let off_start = cur.position() as usize;
+    let offsets = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    cur.set_position((off_start + off_len) as u64);
+
+    let cd_len = cur.read_u32::<LittleEndian>()? as usize;
+    let cd_start = cur.position() as usize;
+    let code_bytes = brotli_decompress(&cur.get_ref()[cd_start..cd_start + cd_len])?;
+
+    if offsets.len() != count + 1 {
+        return Err(FluxError::InvalidFile(format!(
+            "fsst_brotli offsets length {} != count+1 {}", offsets.len(), count + 1,
+        )));
+    }
+    let decompressor = compressor.decompressor();
+    let mut strings = Vec::with_capacity(count);
+    for i in 0..count {
+        let s = offsets[i] as usize;
+        let e = offsets[i + 1] as usize;
+        if e > code_bytes.len() || s > e {
+            return Err(FluxError::InvalidFile("fsst_brotli offsets out of range".into()));
+        }
+        strings.push(decompressor.decompress(&code_bytes[s..e]));
+    }
+    Ok((strings, cd_start + cd_len))
+}
+
+/// Direct-to-Arrow: Raw + Brotli.
+fn decompress_raw_brotli_to_arrow(
+    cur: &mut Cursor<&[u8]>,
+    count: usize,
+) -> FluxResult<ArrayRef> {
+    let off_len = cur.read_u32::<LittleEndian>()? as usize;
+    let off_start = cur.position() as usize;
+    let offsets_u64 = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    cur.set_position((off_start + off_len) as u64);
+
+    let cd_len = cur.read_u32::<LittleEndian>()? as usize;
+    let cd_start = cur.position() as usize;
+    let data_buf = brotli_decompress(&cur.get_ref()[cd_start..cd_start + cd_len])?;
+
+    if offsets_u64.len() != count + 1 {
+        return Err(FluxError::InvalidFile(format!(
+            "raw_brotli to_arrow offsets length {} != count+1 {}", offsets_u64.len(), count + 1,
+        )));
+    }
+    let offsets_i32: Vec<i32> = offsets_u64.iter().map(|&o| o as i32).collect();
+    let offsets_buf = OffsetBuffer::new(ScalarBuffer::from(offsets_i32));
+    let values_buf = Buffer::from(data_buf);
+    let arr = unsafe { StringArray::new_unchecked(offsets_buf, values_buf, None) };
+    Ok(Arc::new(arr))
+}
+
+/// Direct-to-Arrow: FSST + Brotli.
+fn decompress_fsst_brotli_to_arrow(
+    cur: &mut Cursor<&[u8]>,
+    count: usize,
+) -> FluxResult<ArrayRef> {
+    use rayon::prelude::*;
+
+    let table_len = cur.read_u16::<LittleEndian>()? as usize;
+    let table_start = cur.position() as usize;
+    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    cur.set_position((table_start + table_len) as u64);
+
+    let off_len = cur.read_u32::<LittleEndian>()? as usize;
+    let off_start = cur.position() as usize;
+    let offsets_u64 = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    cur.set_position((off_start + off_len) as u64);
+
+    let cd_len = cur.read_u32::<LittleEndian>()? as usize;
+    let cd_start = cur.position() as usize;
+    let code_bytes = brotli_decompress(&cur.get_ref()[cd_start..cd_start + cd_len])?;
+
+    if offsets_u64.len() != count + 1 {
+        return Err(FluxError::InvalidFile(format!(
+            "fsst_brotli to_arrow offsets length {} != count+1 {}", offsets_u64.len(), count + 1,
+        )));
+    }
+
+    let decompressor = compressor.decompressor();
+    const FSST_DEC_PAR_THRESHOLD: usize = 8192;
+    let decoded: Vec<Vec<u8>> = if count >= FSST_DEC_PAR_THRESHOLD {
+        (0..count).into_par_iter().map(|i| {
+            let s = offsets_u64[i] as usize;
+            let e = offsets_u64[i + 1] as usize;
+            decompressor.decompress(&code_bytes[s..e])
+        }).collect()
+    } else {
+        (0..count).map(|i| {
+            let s = offsets_u64[i] as usize;
+            let e = offsets_u64[i + 1] as usize;
+            decompressor.decompress(&code_bytes[s..e])
+        }).collect()
+    };
+
+    let total: usize = decoded.iter().map(|v| v.len()).sum();
+    let mut offsets_i32: Vec<i32> = Vec::with_capacity(count + 1);
+    let mut data_buf: Vec<u8> = Vec::with_capacity(total);
+    offsets_i32.push(0);
+    for v in &decoded {
+        data_buf.extend_from_slice(v);
+        offsets_i32.push(data_buf.len() as i32);
+    }
+    let offsets_buf = OffsetBuffer::new(ScalarBuffer::from(offsets_i32));
+    let values_buf = Buffer::from(data_buf);
+    let arr = unsafe { StringArray::new_unchecked(offsets_buf, values_buf, None) };
+    Ok(Arc::new(arr))
 }
 
 /// Raw + zstd-with-dict decode path.
@@ -1473,6 +1850,7 @@ fn decompress_front_coded_to_arrow(
             .map_err(|e| FluxError::Lz4(e.to_string()))?,
         2 => zstd::stream::decode_all(compressed)
             .map_err(|e| FluxError::Internal(format!("zstd front-coded: {e}")))?,
+        3 => brotli_decompress(compressed)?,
         _ => return Err(FluxError::InvalidFile(format!("front-coded: bad codec {codec}"))),
     };
 
@@ -1642,10 +2020,12 @@ pub fn decompress_to_arrow_string_for_column(
         SUB_DICT => decompress_dict_to_arrow(&mut cur, string_count),
         SUB_RAW_LZ4_LEGACY  => decompress_raw_legacy_to_arrow(&mut cur, string_count, false),
         SUB_RAW_ZSTD_LEGACY => decompress_raw_legacy_to_arrow(&mut cur, string_count, true),
-        SUB_RAW_LZ4  => decompress_raw_v2_to_arrow(&mut cur, string_count, false),
-        SUB_RAW_ZSTD => decompress_raw_v2_to_arrow(&mut cur, string_count, true),
-        SUB_FSST_LZ4  => decompress_fsst_to_arrow(&mut cur, string_count, false),
-        SUB_FSST_ZSTD => decompress_fsst_to_arrow(&mut cur, string_count, true),
+        SUB_RAW_LZ4    => decompress_raw_v2_to_arrow(&mut cur, string_count, false),
+        SUB_RAW_ZSTD   => decompress_raw_v2_to_arrow(&mut cur, string_count, true),
+        SUB_RAW_BROTLI => decompress_raw_brotli_to_arrow(&mut cur, string_count),
+        SUB_FSST_LZ4    => decompress_fsst_to_arrow(&mut cur, string_count, false),
+        SUB_FSST_ZSTD   => decompress_fsst_to_arrow(&mut cur, string_count, true),
+        SUB_FSST_BROTLI => decompress_fsst_brotli_to_arrow(&mut cur, string_count),
         SUB_RAW_ZSTD_DICT  => decompress_raw_zstd_dict_to_arrow(&mut cur, string_count),
         SUB_FSST_ZSTD_DICT => decompress_fsst_zstd_dict_to_arrow(&mut cur, string_count),
         SUB_FRONT_CODED    => decompress_front_coded_to_arrow(&mut cur, string_count),

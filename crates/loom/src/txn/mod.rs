@@ -28,7 +28,7 @@ pub mod projection;
 
 pub use log_entry::{Action, LogEntry, Operation};
 pub use snapshot::Snapshot;
-pub use table::{FluxTable, FluxScan};
+pub use table::{FluxTable, FluxScan, EvolveOptions};
 pub use partition::{
     PartitionTransform, PartitionField, PartitionSpec,
     ColumnStats, FileManifest, TableMeta,

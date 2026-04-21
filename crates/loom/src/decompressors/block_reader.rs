@@ -7,6 +7,7 @@
 //! to the correct decompressor.  Returns the decoded `u128` values and the
 //! number of bytes consumed from the input slice.
 
+use std::io::Read;
 use crate::{
     error::{FluxError, FluxResult},
     SecondaryCodec,
@@ -63,6 +64,24 @@ pub fn decompress_block(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
             let payload = &data[6..6 + comp_len];
             inner_data = zstd::stream::decode_all(payload)
                 .map_err(|e| FluxError::Internal(format!("zstd decompress: {e}")))?;
+            let mut rebuilt = vec![tag, 0u8];
+            rebuilt.extend_from_slice(&inner_data);
+            return decompress_inner(&rebuilt);
+        }
+        // SecondaryCodec::Brotli (=3) is not emitted for numeric blocks —
+        // the Brotli profile falls back to Zstd for numeric data and stores
+        // it with the Zstd tag.  This arm exists for forward-compatibility.
+        SecondaryCodec::Brotli => {
+            if data.len() < 6 {
+                return Err(FluxError::InvalidFile("Brotli block too short".into()));
+            }
+            let comp_len = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
+            let payload = &data[6..6 + comp_len];
+            let mut decompressed = Vec::new();
+            brotli::Decompressor::new(payload, 4096)
+                .read_to_end(&mut decompressed)
+                .map_err(|e| FluxError::Internal(format!("brotli decompress: {e}")))?;
+            inner_data = decompressed;
             let mut rebuilt = vec![tag, 0u8];
             rebuilt.extend_from_slice(&inner_data);
             return decompress_inner(&rebuilt);

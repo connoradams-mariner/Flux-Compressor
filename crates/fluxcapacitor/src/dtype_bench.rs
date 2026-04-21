@@ -195,9 +195,10 @@ fn raw_bytes(batch: &RecordBatch) -> usize {
 
 fn bench_flux(batch: &RecordBatch, raw: usize, profile: CompressionProfile) -> BenchResult {
     let name = match profile {
-        CompressionProfile::Speed => "Flux (speed)",
+        CompressionProfile::Speed    => "Flux (speed)",
         CompressionProfile::Balanced => "Flux (balanced)",
-        CompressionProfile::Archive => "Flux (archive)",
+        CompressionProfile::Archive  => "Flux (archive)",
+        CompressionProfile::Brotli   => "Flux (brotli)",
     };
 
     // FluxCompress now supports all Arrow types (numeric, string, nested).

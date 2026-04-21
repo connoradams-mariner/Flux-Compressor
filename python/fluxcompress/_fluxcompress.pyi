@@ -220,3 +220,288 @@ def read_flux(path: str) -> FluxBuffer:
 def write_flux(buf: FluxBuffer, path: str) -> None:
     """Write a :class:`FluxBuffer` to a ``.flux`` file."""
     ...
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stateful writer with per-column Zstd dictionary cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FluxWriter:
+    """
+    A stateful compressor with a per-column Zstd dictionary cache.
+
+    On the **first** :meth:`compress` call per string column, a compact Zstd
+    dictionary (8 KB) is trained from the column data.  Subsequent calls
+    reuse the cached dictionary at Zstd level 5, achieving near-Archive
+    compression ratio at 3–4× the write throughput.
+
+    Ideal for repeated :meth:`FluxTable.append` calls on a stable table schema::
+
+        writer = fc.FluxWriter(profile="archive")
+        for batch in incoming_stream:
+            tbl.append(writer.compress(batch))  # 2nd+ batches use cached dicts
+
+    For one-shot compression, use the module-level :func:`compress` function
+    which creates a fresh (uncached) writer each time.
+    """
+
+    def __new__(
+        cls,
+        profile: str = "archive",
+        u64_only: bool = False,
+    ) -> FluxWriter: ...
+
+    def compress(self, table: pa.Table) -> FluxBuffer:
+        """
+        Compress a PyArrow Table or RecordBatch, using cached column
+        dictionaries on the second and subsequent calls.
+        """
+        ...
+
+    @property
+    def dict_count(self) -> int:
+        """Number of column dictionaries currently held in the cache."""
+        ...
+
+    def clear_cache(self) -> None:
+        """Evict all cached dictionaries, forcing re-training on the next call."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase F — Schema-evolution surface
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SchemaField:
+    """
+    A single field in a :class:`TableSchema`.
+
+    The ``field_id`` is the *immutable logical identifier* for the column —
+    names can change and numeric types can be promoted, but ``field_id`` is
+    stable for the table's lifetime.
+
+    Example::
+
+        f = fc.SchemaField(1, "user_id", "uint64", nullable=False)
+        f = fc.SchemaField(2, "rev", "int64").with_int_default(0).with_doc("Cents")
+    """
+
+    field_id: int
+    """Stable logical identifier for this column."""
+
+    name: str
+    """Current user-facing column name."""
+
+    dtype: str
+    """Logical dtype string (e.g. ``"uint64"``, ``"utf8"``)."""
+
+    nullable: bool
+    """Whether NULLs are permitted."""
+
+    default_value: object
+    """Literal default value, or ``None``."""
+
+    doc: Optional[str]
+    """Optional documentation string."""
+
+    def __new__(
+        cls,
+        field_id: int,
+        name: str,
+        dtype: str,
+        nullable: bool = True,
+    ) -> SchemaField: ...
+
+    def with_nullable(self, nullable: bool) -> SchemaField: ...
+    def with_int_default(self, value: int) -> SchemaField: ...
+    def with_uint_default(self, value: int) -> SchemaField: ...
+    def with_float_default(self, value: float) -> SchemaField: ...
+    def with_bool_default(self, value: bool) -> SchemaField: ...
+    def with_str_default(self, value: str) -> SchemaField: ...
+    def with_doc(self, doc: str) -> SchemaField: ...
+    def __repr__(self) -> str: ...
+
+
+class TableSchema:
+    """
+    The logical schema of a :class:`FluxTable` at a given schema version.
+
+    Example::
+
+        schema = fc.TableSchema([
+            fc.SchemaField(1, "id",   "uint64", nullable=False),
+            fc.SchemaField(2, "name", "utf8"),
+        ])
+    """
+
+    schema_id: int
+    """Monotonically increasing schema version identifier."""
+
+    parent_schema_id: Optional[int]
+    """Parent schema id (``None`` for the first schema)."""
+
+    fields: list[SchemaField]
+    """Fields in user-visible column order."""
+
+    change_summary: Optional[str]
+    """Human-readable change summary (advisory only)."""
+
+    def __new__(cls, fields: list[SchemaField]) -> TableSchema: ...
+
+    def field_by_id(self, field_id: int) -> Optional[SchemaField]:
+        """Look up a field by stable field_id. Returns ``None`` if not found."""
+        ...
+
+    def field_by_name(self, name: str) -> Optional[SchemaField]:
+        """Look up a field by display name. Returns ``None`` if not found."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class EvolveOptions:
+    """
+    Options controlling schema-evolution behaviour.
+
+    Example::
+
+        # Default — no nullability tightening allowed
+        opts = fc.EvolveOptions()
+
+        # Opt into Phase D null tightening (requires manifest-derived proof)
+        opts = fc.EvolveOptions(allow_null_tightening=True)
+        opts = fc.EvolveOptions.with_null_tightening()  # shortcut
+    """
+
+    allow_null_tightening: bool
+    """Whether nullable→non-nullable tightening is permitted."""
+
+    def __new__(
+        cls,
+        allow_null_tightening: bool = False,
+    ) -> EvolveOptions: ...
+
+    @staticmethod
+    def with_null_tightening() -> EvolveOptions:
+        """Shortcut for ``EvolveOptions(allow_null_tightening=True)``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class FluxScan:
+    """
+    Streaming iterator over the live files of a :class:`FluxTable`.
+
+    Returned by :meth:`FluxTable.scan`. Yields one ``pyarrow.Table`` per
+    live file, projected to the current logical schema.
+
+    Example::
+
+        for batch in tbl.scan():
+            print(batch.num_rows)
+    """
+
+    remaining: int
+    """Number of live files not yet yielded."""
+
+    def __iter__(self) -> FluxScan: ...
+    def __next__(self) -> pa.Table: ...
+
+
+class FluxTable:
+    """
+    A versioned columnar table backed by a ``.fluxtable/`` directory.
+
+    Provides schema-evolution-aware append, scan, and time-travel operations
+    via an immutable transaction log.
+
+    Example::
+
+        import fluxcompress as fc
+        import pyarrow as pa
+
+        tbl = fc.FluxTable("my_table.fluxtable")
+
+        schema = fc.TableSchema([
+            fc.SchemaField(1, "id",  "uint64", nullable=False),
+            fc.SchemaField(2, "val", "int64"),
+        ])
+        tbl.evolve_schema(schema)
+
+        buf = fc.compress(pa.table({"id": [1, 2], "val": [10, 20]}))
+        tbl.append(buf)
+
+        for batch in tbl.scan():
+            print(batch)
+    """
+
+    def __new__(cls, path: str) -> FluxTable: ...
+
+    @staticmethod
+    def open(path: str) -> FluxTable:
+        """Open (or create) a FluxTable — alias for the constructor."""
+        ...
+
+    def append(self, buf: FluxBuffer) -> int:
+        """
+        Append a :class:`FluxBuffer` to the table.
+
+        Returns:
+            ``int`` — the version number of the new log entry.
+        """
+        ...
+
+    def evolve_schema(self, schema: TableSchema) -> int:
+        """
+        Evolve the table's logical schema (no data rewrite).
+
+        Returns:
+            ``int`` — the version number of the schema-change log entry.
+        """
+        ...
+
+    def evolve_schema_with_options(
+        self,
+        schema: TableSchema,
+        opts: EvolveOptions,
+    ) -> int:
+        """
+        Evolve the schema with explicit :class:`EvolveOptions`.
+
+        Returns:
+            ``int`` — the version number of the schema-change log entry.
+        """
+        ...
+
+    def scan(self) -> FluxScan:
+        """
+        Start a streaming scan over all live files projected to the current schema.
+
+        Returns:
+            :class:`FluxScan` iterator yielding one ``pyarrow.Table`` per file.
+        """
+        ...
+
+    def live_files(self) -> list[str]:
+        """Return absolute paths of all live data files at the latest version."""
+        ...
+
+    def current_version(self) -> Optional[int]:
+        """Return the latest log version, or ``None`` if the log is empty."""
+        ...
+
+    def field_ids_for_current_schema(self) -> dict[str, int]:
+        """
+        Return a ``dict`` mapping column names to their stable ``field_id``
+        values. Empty dict when no schema has been declared yet.
+        """
+        ...
+
+    def current_schema(self) -> Optional[TableSchema]:
+        """Return the current :class:`TableSchema`, or ``None`` if unset."""
+        ...
+
+    def __repr__(self) -> str: ...

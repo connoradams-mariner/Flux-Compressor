@@ -43,6 +43,7 @@ dev    = [
     "polars>=0.20",
     "numpy",
     "pyarrow>=14.0",
+    "deltalake>=1.0",
 ]
 
 [project.urls]

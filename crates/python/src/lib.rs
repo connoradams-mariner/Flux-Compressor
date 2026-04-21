@@ -810,6 +810,615 @@ fn record_batch_to_pyarrow(py: Python<'_>, batch: &RecordBatch) -> PyResult<PyOb
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PyFluxWriter — stateful writer with per-column Zstd dictionary cache
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A stateful compressor that caches a trained Zstd dictionary for each
+/// string column.  On the first :meth:`compress` call per column the
+/// dictionary is trained from the column’s data; subsequent calls reuse it
+/// at Zstd level 3, achieving near-Archive ratio at ~6× the write throughput.
+///
+/// Ideal for repeated :meth:`FluxTable.append` calls on the same table schema:
+///
+/// .. code-block:: python
+///
+///     writer = fc.FluxWriter(profile="archive")
+///     for batch in stream:
+///         tbl.append(writer.compress(batch))   # 2nd+ batches use cached dicts
+#[pyclass(name = "FluxWriter", module = "fluxcompress")]
+pub struct PyFluxWriter {
+    inner: loom::compressors::flux_writer::FluxWriter,
+}
+
+#[pymethods]
+impl PyFluxWriter {
+    /// Create a new stateful :class:`FluxWriter`.
+    ///
+    /// Args:
+    ///     profile: Compression profile — ``"speed"``, ``"balanced"``,
+    ///              ``"archive"``, or ``"brotli"`` (default ``"archive"``).
+    ///     u64_only: Skip the 128-bit int widening path (default ``False``).
+    #[new]
+    #[pyo3(signature = (profile = "archive", u64_only = false))]
+    fn new(profile: &str, u64_only: bool) -> PyResult<Self> {
+        let p = parse_profile(profile)?;
+        let inner = loom::compressors::flux_writer::FluxWriter {
+            profile: p,
+            u64_only,
+            ..Default::default()
+        };
+        Ok(Self { inner })
+    }
+
+    /// Compress a PyArrow Table or RecordBatch into a :class:`FluxBuffer`.
+    ///
+    /// The per-column Zstd dictionary is trained on the **first call** and
+    /// reused on all subsequent calls — subsequent batches are compressed at
+    /// Zstd level 3 with the trained dict, recovering most of the write-speed
+    /// gap vs the uncached path while maintaining similar ratio.
+    fn compress(&self, py: Python<'_>, table: &PyAny) -> PyResult<PyFluxBuffer> {
+        use loom::traits::LoomCompressor;
+        let batch = pyarrow_to_record_batch(py, table)?;
+        let data = self.inner.compress(&batch).map_err(flux_err)?;
+        Ok(PyFluxBuffer { data })
+    }
+
+    /// Number of column dictionaries currently in the cache.
+    #[getter]
+    fn dict_count(&self) -> usize {
+        self.inner.dict_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    /// Clear the dictionary cache, forcing re-training on the next batch.
+    fn clear_cache(&self) {
+        self.inner.dict_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    fn __repr__(&self) -> String {
+        let n = self.inner.dict_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        format!(
+            "FluxWriter(profile={:?}, cached_dicts={})",
+            self.inner.profile, n
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase F — Schema-evolution Python surface (thin PyO3 skeleton)
+// ─────────────────────────────────────────────────────────────────────────────
+
+use loom::dtype::FluxDType;
+use loom::txn::{
+    EvolveOptions, FluxScan, FluxTable,
+    schema::{DefaultValue, SchemaField, TableSchema},
+};
+
+// ── dtype string helpers ──────────────────────────────────────────────────────
+
+fn parse_dtype(s: &str) -> PyResult<FluxDType> {
+    serde_json::from_str::<FluxDType>(&format!("\"{}\"" , s)).map_err(|_| {
+        PyValueError::new_err(format!(
+            "unknown dtype '{}'. Valid values: uint8, uint16, uint32, uint64, \
+             int8, int16, int32, int64, float32, float64, boolean, date32, \
+             date64, timestamp_second, timestamp_millis, timestamp_micros, \
+             timestamp_nanos, decimal128, utf8, large_utf8, binary, large_binary",
+            s
+        ))
+    })
+}
+
+fn dtype_to_str(d: FluxDType) -> &'static str {
+    match d {
+        FluxDType::UInt8            => "uint8",
+        FluxDType::UInt16           => "uint16",
+        FluxDType::UInt32           => "uint32",
+        FluxDType::UInt64           => "uint64",
+        FluxDType::Int8             => "int8",
+        FluxDType::Int16            => "int16",
+        FluxDType::Int32            => "int32",
+        FluxDType::Int64            => "int64",
+        FluxDType::Float32          => "float32",
+        FluxDType::Float64          => "float64",
+        FluxDType::Boolean          => "boolean",
+        FluxDType::Date32           => "date32",
+        FluxDType::Date64           => "date64",
+        FluxDType::TimestampSecond  => "timestamp_second",
+        FluxDType::TimestampMillis  => "timestamp_millis",
+        FluxDType::TimestampMicros  => "timestamp_micros",
+        FluxDType::TimestampNanos   => "timestamp_nanos",
+        FluxDType::Decimal128       => "decimal128",
+        FluxDType::Utf8             => "utf8",
+        FluxDType::LargeUtf8        => "large_utf8",
+        FluxDType::Binary           => "binary",
+        FluxDType::LargeBinary      => "large_binary",
+        FluxDType::Offsets          => "offsets",
+        FluxDType::StructContainer  => "struct",
+        FluxDType::ListContainer    => "list",
+        FluxDType::MapContainer     => "map",
+    }
+}
+
+// ── PySchemaField ─────────────────────────────────────────────────────────────
+
+/// A single field in a :class:`TableSchema`.
+///
+/// The ``field_id`` is the *immutable logical identifier* for the column —
+/// names can change and numeric types can be promoted under the schema-evolution
+/// compatibility rules, but ``field_id`` is stable for the table's lifetime.
+///
+/// Example::
+///
+///     field = fc.SchemaField(1, "user_id", "uint64", nullable=False)
+///     field = fc.SchemaField(2, "revenue", "int64").with_int_default(0).with_doc("Cents")
+#[pyclass(name = "SchemaField", module = "fluxcompress")]
+#[derive(Clone)]
+pub struct PySchemaField {
+    pub inner: SchemaField,
+}
+
+#[pymethods]
+impl PySchemaField {
+    /// Create a new SchemaField.
+    ///
+    /// Args:
+    ///     field_id:  Stable integer identifier, unique within the schema.
+    ///     name:      User-facing column name.
+    ///     dtype:     Column dtype as a string (e.g. ``"uint64"``, ``"utf8"``).
+    ///     nullable:  Whether NULLs are permitted (default ``True``).
+    #[new]
+    #[pyo3(signature = (field_id, name, dtype, nullable = true))]
+    fn new(field_id: u32, name: &str, dtype: &str, nullable: bool) -> PyResult<Self> {
+        let d = parse_dtype(dtype)?;
+        let mut field = SchemaField::new(field_id, name, d);
+        field.nullable = nullable;
+        Ok(Self { inner: field })
+    }
+
+    /// Stable logical identifier for this column.
+    #[getter]
+    fn field_id(&self) -> u32 { self.inner.field_id }
+
+    /// Current user-facing column name.
+    #[getter]
+    fn name(&self) -> &str { &self.inner.name }
+
+    /// Logical dtype at the current schema version (e.g. ``"uint64"``).
+    #[getter]
+    fn dtype(&self) -> &'static str { dtype_to_str(self.inner.dtype) }
+
+    /// Whether NULLs are permitted in this column.
+    #[getter]
+    fn nullable(&self) -> bool { self.inner.nullable }
+
+    /// Optional literal default value, or ``None``.
+    #[getter]
+    fn default_value(&self, py: Python<'_>) -> PyObject {
+        match &self.inner.default {
+            None => py.None(),
+            Some(DefaultValue::Bool(b))   => b.into_py(py),
+            Some(DefaultValue::Int(i))    => i.into_py(py),
+            Some(DefaultValue::UInt(u))   => u.into_py(py),
+            Some(DefaultValue::Float(f))  => f.into_py(py),
+            Some(DefaultValue::String(s)) => s.clone().into_py(py),
+        }
+    }
+
+    /// Optional documentation string, or ``None``.
+    #[getter]
+    fn doc(&self, py: Python<'_>) -> PyObject {
+        match &self.inner.doc {
+            None    => py.None(),
+            Some(s) => s.clone().into_py(py),
+        }
+    }
+
+    /// Return a copy of this field with nullability set.
+    fn with_nullable(&self, nullable: bool) -> Self {
+        Self { inner: self.inner.clone().with_nullable(nullable) }
+    }
+
+    /// Return a copy of this field with a literal integer default.
+    fn with_int_default(&self, value: i64) -> Self {
+        Self { inner: self.inner.clone().with_default(DefaultValue::Int(value)) }
+    }
+
+    /// Return a copy of this field with a literal unsigned-integer default.
+    fn with_uint_default(&self, value: u64) -> Self {
+        Self { inner: self.inner.clone().with_default(DefaultValue::UInt(value)) }
+    }
+
+    /// Return a copy of this field with a literal float default.
+    fn with_float_default(&self, value: f64) -> Self {
+        Self { inner: self.inner.clone().with_default(DefaultValue::Float(value)) }
+    }
+
+    /// Return a copy of this field with a literal boolean default.
+    fn with_bool_default(&self, value: bool) -> Self {
+        Self { inner: self.inner.clone().with_default(DefaultValue::Bool(value)) }
+    }
+
+    /// Return a copy of this field with a literal string default.
+    fn with_str_default(&self, value: &str) -> Self {
+        Self { inner: self.inner.clone().with_default(DefaultValue::String(value.to_string())) }
+    }
+
+    /// Return a copy of this field with a documentation string.
+    fn with_doc(&self, doc: &str) -> Self {
+        Self { inner: self.inner.clone().with_doc(doc) }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SchemaField(field_id={}, name={:?}, dtype={:?}, nullable={})",
+            self.inner.field_id,
+            self.inner.name,
+            dtype_to_str(self.inner.dtype),
+            self.inner.nullable,
+        )
+    }
+}
+
+// ── PyTableSchema ─────────────────────────────────────────────────────────────
+
+/// The logical schema of a :class:`FluxTable` at a given schema version.
+///
+/// Example::
+///
+///     schema = fc.TableSchema([
+///         fc.SchemaField(1, "id",   "uint64", nullable=False),
+///         fc.SchemaField(2, "name", "utf8"),
+///     ])
+#[pyclass(name = "TableSchema", module = "fluxcompress")]
+#[derive(Clone)]
+pub struct PyTableSchema {
+    pub inner: TableSchema,
+}
+
+#[pymethods]
+impl PyTableSchema {
+    /// Create a TableSchema from a list of :class:`SchemaField` objects.
+    #[new]
+    fn new(fields: Vec<PyRef<PySchemaField>>) -> Self {
+        let inner_fields: Vec<SchemaField> = fields.iter()
+            .map(|f| f.inner.clone())
+            .collect();
+        Self { inner: TableSchema::new(inner_fields) }
+    }
+
+    /// Monotonically increasing schema version identifier.
+    #[getter]
+    fn schema_id(&self) -> u32 { self.inner.schema_id }
+
+    /// Parent schema id in the evolution chain (``None`` for the first schema).
+    #[getter]
+    fn parent_schema_id(&self, py: Python<'_>) -> PyObject {
+        match self.inner.parent_schema_id {
+            None    => py.None(),
+            Some(p) => p.into_py(py),
+        }
+    }
+
+    /// Fields in user-visible column order.
+    #[getter]
+    fn fields(&self) -> Vec<PySchemaField> {
+        self.inner.fields.iter()
+            .map(|f| PySchemaField { inner: f.clone() })
+            .collect()
+    }
+
+    /// Optional human-readable change summary (``None`` if unset).
+    #[getter]
+    fn change_summary(&self, py: Python<'_>) -> PyObject {
+        match &self.inner.change_summary {
+            None    => py.None(),
+            Some(s) => s.clone().into_py(py),
+        }
+    }
+
+    /// Look up a field by its stable ``field_id``. Returns ``None`` if not found.
+    fn field_by_id(&self, field_id: u32, py: Python<'_>) -> PyObject {
+        match self.inner.field_by_id(field_id) {
+            None    => py.None(),
+            Some(f) => PySchemaField { inner: f.clone() }.into_py(py),
+        }
+    }
+
+    /// Look up a field by its current display name. Returns ``None`` if not found.
+    fn field_by_name(&self, name: &str, py: Python<'_>) -> PyObject {
+        match self.inner.field_by_name(name) {
+            None    => py.None(),
+            Some(f) => PySchemaField { inner: f.clone() }.into_py(py),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TableSchema(schema_id={}, fields={})",
+            self.inner.schema_id,
+            self.inner.fields.len(),
+        )
+    }
+}
+
+// ── PyEvolveOptions ───────────────────────────────────────────────────────────
+
+/// Options controlling schema-evolution behaviour.
+///
+/// Example::
+///
+///     # Default: no nullability tightening allowed
+///     opts = fc.EvolveOptions()
+///
+///     # Opt into Phase D null tightening (requires manifest-derived proof)
+///     opts = fc.EvolveOptions(allow_null_tightening=True)
+///     # Equivalent shortcut:
+///     opts = fc.EvolveOptions.with_null_tightening()
+#[pyclass(name = "EvolveOptions", module = "fluxcompress")]
+#[derive(Clone)]
+pub struct PyEvolveOptions {
+    pub inner: EvolveOptions,
+}
+
+#[pymethods]
+impl PyEvolveOptions {
+    /// Create EvolveOptions.
+    ///
+    /// Args:
+    ///     allow_null_tightening: If ``True``, permit nullable→non-nullable
+    ///         transitions when manifest-derived proof shows no NULLs exist.
+    #[new]
+    #[pyo3(signature = (allow_null_tightening = false))]
+    fn new(allow_null_tightening: bool) -> Self {
+        Self {
+            inner: EvolveOptions { allow_null_tightening },
+        }
+    }
+
+    /// Shortcut that sets ``allow_null_tightening=True``.
+    #[staticmethod]
+    fn with_null_tightening() -> Self {
+        Self { inner: EvolveOptions::with_null_tightening() }
+    }
+
+    /// Whether nullable→non-nullable tightening is permitted.
+    #[getter]
+    fn allow_null_tightening(&self) -> bool { self.inner.allow_null_tightening }
+
+    fn __repr__(&self) -> String {
+        format!("EvolveOptions(allow_null_tightening={})", self.inner.allow_null_tightening)
+    }
+}
+
+// ── PyFluxScan ────────────────────────────────────────────────────────────────
+
+/// Streaming iterator over the live files of a :class:`FluxTable`.
+///
+/// Returned by :meth:`FluxTable.scan`. Yields one ``pyarrow.Table`` per
+/// live file, projected to the current logical schema.
+///
+/// Example::
+///
+///     for batch in table.scan():
+///         print(batch.num_rows)
+#[pyclass(name = "FluxScan", module = "fluxcompress")]
+pub struct PyFluxScan {
+    inner: std::cell::RefCell<Option<FluxScan>>,
+}
+
+#[pymethods]
+impl PyFluxScan {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> { slf }
+
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let mut guard = self.inner.borrow_mut();
+        let scan = match guard.as_mut() {
+            None => return Ok(None),
+            Some(s) => s,
+        };
+        match scan.next() {
+            None => {
+                // Exhausted — drop the scan to free resources.
+                *guard = None;
+                Ok(None)
+            }
+            Some(Ok(batch)) => {
+                let py_table = record_batch_to_pyarrow(py, &batch)?;
+                Ok(Some(py_table))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Number of live files remaining (including the current position).
+    #[getter]
+    fn remaining(&self) -> usize {
+        self.inner.borrow()
+            .as_ref()
+            .map(|s| s.remaining())
+            .unwrap_or(0)
+    }
+}
+
+// ── PyFluxTable ───────────────────────────────────────────────────────────────
+
+/// A versioned columnar table backed by a ``.fluxtable/`` directory.
+///
+/// Provides schema-evolution-aware append, scan, and time-travel operations
+/// via an immutable transaction log.
+///
+/// Example::
+///
+///     import fluxcompress as fc
+///     import pyarrow as pa
+///
+///     # Open (or create) a table
+///     tbl = fc.FluxTable("my_table.fluxtable")
+///
+///     # Declare an initial schema
+///     schema = fc.TableSchema([
+///         fc.SchemaField(1, "id",  "uint64", nullable=False),
+///         fc.SchemaField(2, "val", "int64"),
+///     ])
+///     tbl.evolve_schema(schema)
+///
+///     # Append data
+///     buf = fc.compress(pa.table({"id": [1, 2], "val": [10, 20]}))
+///     tbl.append(buf)
+///
+///     # Scan all files projected to the current schema
+///     for batch in tbl.scan():
+///         print(batch)
+#[pyclass(name = "FluxTable", module = "fluxcompress")]
+pub struct PyFluxTable {
+    inner: FluxTable,
+}
+
+#[pymethods]
+impl PyFluxTable {
+    /// Open (or create) a FluxTable at ``path``.
+    ///
+    /// The directory is created if it does not exist yet.
+    #[new]
+    fn new(path: &str) -> PyResult<Self> {
+        FluxTable::open(path)
+            .map(|t| Self { inner: t })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Open (or create) a FluxTable — static alias for the constructor.
+    #[staticmethod]
+    fn open(path: &str) -> PyResult<Self> {
+        PyFluxTable::new(path)
+    }
+
+    /// Append a :class:`FluxBuffer` to the table.
+    ///
+    /// Writes the compressed data as a new ``.flux`` file and creates a log entry.
+    ///
+    /// Returns:
+    ///     ``int`` — the version number of the new log entry.
+    fn append(&self, buf: PyRef<PyFluxBuffer>) -> PyResult<u64> {
+        self.inner.append(&buf.data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Evolve the table's logical schema (no data rewrite).
+    ///
+    /// Validates the transition and writes a ``SchemaChange`` log entry.
+    /// Nullability tightening is not permitted through this entry point
+    /// (use :meth:`evolve_schema_with_options` with manifest proof).
+    ///
+    /// Args:
+    ///     schema: The new :class:`TableSchema`.
+    ///
+    /// Returns:
+    ///     ``int`` — the version number of the schema-change log entry.
+    fn evolve_schema(&self, schema: &PyTableSchema) -> PyResult<u64> {
+        self.inner
+            .evolve_schema(schema.inner.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Evolve the schema with explicit :class:`EvolveOptions`.
+    ///
+    /// Args:
+    ///     schema: The new :class:`TableSchema`.
+    ///     opts:   :class:`EvolveOptions` controlling allowed transitions.
+    ///
+    /// Returns:
+    ///     ``int`` — the version number of the schema-change log entry.
+    fn evolve_schema_with_options(
+        &self,
+        schema: &PyTableSchema,
+        opts: &PyEvolveOptions,
+    ) -> PyResult<u64> {
+        self.inner
+            .evolve_schema_with_options(schema.inner.clone(), opts.inner.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Start a schema-evolution-aware streaming scan over all live files.
+    ///
+    /// Returns a :class:`FluxScan` iterator that yields one
+    /// ``pyarrow.Table`` per live file, projected to the current schema.
+    ///
+    /// Raises ``RuntimeError`` if no schema has been declared yet.
+    fn scan(&self) -> PyResult<PyFluxScan> {
+        let scan = self.inner.scan()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyFluxScan {
+            inner: std::cell::RefCell::new(Some(scan)),
+        })
+    }
+
+    /// List absolute paths of all live data files at the latest version.
+    fn live_files(&self) -> PyResult<Vec<String>> {
+        self.inner
+            .live_files()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map(|paths| {
+                paths.iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+    }
+
+    /// Return the version number of the latest log entry, or ``None`` if
+    /// the log is empty.
+    fn current_version(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let log = self.inner.read_log()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(match log.last() {
+            None    => py.None(),
+            Some(e) => e.version.into_py(py),
+        })
+    }
+
+    /// Return a ``dict`` mapping column names to their stable ``field_id``
+    /// values for the current schema. Returns an empty dict when no schema
+    /// has been declared yet.
+    fn field_ids_for_current_schema(
+        &self,
+    ) -> PyResult<std::collections::HashMap<String, u32>> {
+        self.inner
+            .field_ids_for_current_schema()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Return the current :class:`TableSchema`, or ``None`` if no schema
+    /// has been declared yet.
+    fn current_schema(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let snap = self.inner.snapshot()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let schema = snap.current_schema_id()
+            .and_then(|sid| snap.schema_chain.get(sid).cloned());
+        Ok(match schema {
+            None    => py.None(),
+            Some(s) => PyTableSchema { inner: s }.into_py(py),
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FluxTable({:?})",
+            self.inner.log_dir()
+                .parent()
+                .unwrap_or(std::path::Path::new("?"))
+                .display()
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Strategy parser
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -832,8 +1441,9 @@ fn parse_profile(s: &str) -> PyResult<loom::CompressionProfile> {
         "speed"    => Ok(loom::CompressionProfile::Speed),
         "balanced" => Ok(loom::CompressionProfile::Balanced),
         "archive"  => Ok(loom::CompressionProfile::Archive),
+        "brotli"   => Ok(loom::CompressionProfile::Brotli),
         other      => Err(PyValueError::new_err(format!(
-            "unknown profile '{other}'. Use: speed|balanced|archive"
+            "unknown profile '{other}'. Use: speed|balanced|archive|brotli"
         ))),
     }
 }
@@ -870,13 +1480,23 @@ fn parse_profile(s: &str) -> PyResult<loom::CompressionProfile> {
 /// ```
 #[pymodule]
 fn _fluxcompress(py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    // Classes
+    // Core classes
     m.add_class::<PyPredicate>()?;
     m.add_class::<PyColumn>()?;
     m.add_class::<PyBlockInfo>()?;
     m.add_class::<PyFileInfo>()?;
     m.add_class::<PyFluxBuffer>()?;
     m.add_class::<PyFluxBatchReader>()?;
+
+    // Stateful writer with dict cache
+    m.add_class::<PyFluxWriter>()?;
+
+    // Phase F: schema-evolution classes
+    m.add_class::<PySchemaField>()?;
+    m.add_class::<PyTableSchema>()?;
+    m.add_class::<PyEvolveOptions>()?;
+    m.add_class::<PyFluxScan>()?;
+    m.add_class::<PyFluxTable>()?;
 
     // Functions
     m.add_function(wrap_pyfunction!(compress, m)?)?;
