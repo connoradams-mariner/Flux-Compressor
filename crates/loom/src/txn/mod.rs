@@ -23,11 +23,15 @@ mod snapshot;
 mod table;
 pub mod partition;
 pub mod optimizer;
+pub mod schema;
+pub mod projection;
 
-pub use log_entry::{LogEntry, Operation};
+pub use log_entry::{Action, LogEntry, Operation};
 pub use snapshot::Snapshot;
-pub use table::FluxTable;
+pub use table::{FluxTable, FluxScan};
 pub use partition::{
     PartitionTransform, PartitionField, PartitionSpec,
     ColumnStats, FileManifest, TableMeta,
 };
+pub use schema::{DefaultValue, PromotedFrom, SchemaChain, SchemaField, TableSchema};
+pub use projection::{build_file_plan, ColumnPlan, FilePlan};

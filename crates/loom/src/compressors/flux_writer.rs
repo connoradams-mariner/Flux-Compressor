@@ -99,6 +99,12 @@ pub struct FluxWriter {
     /// `source_column` in its fields is treated as `isolated` — it's
     /// compressed standalone so partition pruning + pushdown stay correct.
     pub partition_spec: Option<crate::txn::partition::PartitionSpec>,
+    /// Phase E: optional map from *batch column name* to logical
+    /// `field_id`. When populated, each top-level
+    /// [`ColumnDescriptor`] emitted in the Atlas footer is stamped
+    /// with the matching `field_id`. Unknown names fall back to
+    /// `field_id = None`, preserving pre-Phase-E behaviour.
+    pub field_ids: std::collections::HashMap<String, u32>,
 }
 
 impl Default for FluxWriter {
@@ -110,6 +116,7 @@ impl Default for FluxWriter {
             string_grouping: StringGroupingMode::default(),
             isolated_string_columns: Vec::new(),
             partition_spec: None,
+            field_ids: std::collections::HashMap::new(),
         }
     }
 }
@@ -155,6 +162,29 @@ impl FluxWriter {
         spec: Option<crate::txn::partition::PartitionSpec>,
     ) -> Self {
         self.partition_spec = spec;
+        self
+    }
+
+    /// Phase E: attach a name→`field_id` map so every top-level
+    /// [`ColumnDescriptor`] emitted into the Atlas footer carries a
+    /// logical `field_id`.
+    ///
+    /// Typically fed from
+    /// [`FluxTable::field_ids_for_current_schema`]:
+    /// ```no_run
+    /// # use loom::compressors::flux_writer::FluxWriter;
+    /// # use loom::txn::FluxTable;
+    /// # let table = FluxTable::open("t").unwrap();
+    /// # let batch = unimplemented!();
+    /// let writer = FluxWriter::new()
+    ///     .with_field_ids(table.field_ids_for_current_schema().unwrap());
+    /// let bytes = <_ as loom::traits::LoomCompressor>::compress(&writer, &batch).unwrap();
+    /// ```
+    pub fn with_field_ids(
+        mut self,
+        field_ids: std::collections::HashMap<String, u32>,
+    ) -> Self {
+        self.field_ids = field_ids;
         self
     }
 
@@ -442,11 +472,13 @@ impl LoomCompressor for FluxWriter {
                     array, col_idx as u16, force, profile,
                 )?;
                 all_blocks.push(blocks);
+                let fid = self.field_ids.get(&field_name).copied();
                 schema_descriptors.push(ColumnDescriptor {
                     name: field_name,
                     dtype_tag: FluxDType::Decimal128.as_u8(),
                     children: Vec::new(),
                     column_id: col_idx as u16,
+                    field_id: fid,
                 });
                 continue;
             }
@@ -473,11 +505,13 @@ impl LoomCompressor for FluxWriter {
                         &col, final_strategy, self.u64_only, profile,
                     )?;
                     all_blocks.push(blocks);
+                    let fid = self.field_ids.get(&field_name).copied();
                     schema_descriptors.push(ColumnDescriptor {
                         name: field_name,
                         dtype_tag: dtype_tag.as_u8(),
                         children: Vec::new(),
                         column_id: col_idx as u16,
+                        field_id: fid,
                     });
                 }
                 RouteDecision::Classify => {
@@ -487,11 +521,13 @@ impl LoomCompressor for FluxWriter {
                         &col, force, self.u64_only, profile,
                     )?;
                     all_blocks.push(blocks);
+                    let fid = self.field_ids.get(&field_name).copied();
                     schema_descriptors.push(ColumnDescriptor {
                         name: field_name,
                         dtype_tag: dtype_tag.as_u8(),
                         children: Vec::new(),
                         column_id: col_idx as u16,
+                        field_id: fid,
                     });
                 }
                 RouteDecision::StringPipeline => {
@@ -513,11 +549,13 @@ impl LoomCompressor for FluxWriter {
                         dtype_tag,
                     };
                     all_blocks.push(vec![(block_bytes, meta)]);
+                    let fid = self.field_ids.get(&field_name).copied();
                     schema_descriptors.push(ColumnDescriptor {
                         name: field_name,
                         dtype_tag: dtype_tag.as_u8(),
                         children: Vec::new(),
                         column_id: col_id,
+                        field_id: fid,
                     });
                 }
                 RouteDecision::NestedPipeline => {
@@ -526,7 +564,7 @@ impl LoomCompressor for FluxWriter {
                         .map(|(_, m)| m.column_id + 1)
                         .max()
                         .unwrap_or(col_idx as u16);
-                    let desc = flatten_and_compress(
+                    let mut desc = flatten_and_compress(
                         &field_name,
                         array,
                         &mut next_col_id,
@@ -535,6 +573,10 @@ impl LoomCompressor for FluxWriter {
                         profile,
                         force,
                     )?;
+                    // Phase E: stamp field_id on the top-level nested
+                    // descriptor; children remain None because they
+                    // carry physical-leaf identity, not logical ids.
+                    desc.field_id = self.field_ids.get(&field_name).copied();
                     schema_descriptors.push(desc);
                 }
             }
@@ -602,11 +644,13 @@ impl LoomCompressor for FluxWriter {
                 let field_name = batch_schema.field(col_idx).name().clone();
                 let dtype = FluxDType::from_arrow(batch.column(col_idx).data_type())
                     .unwrap_or(FluxDType::Utf8);
+                let fid = self.field_ids.get(&field_name).copied();
                 schema_descriptors.push(ColumnDescriptor {
                     name: field_name,
                     dtype_tag: dtype.as_u8(),
                     children: Vec::new(),
                     column_id: col_idx as u16,
+                    field_id: fid,
                 });
             }
         }
@@ -873,6 +917,7 @@ fn flatten_to_pending(
                 dtype_tag: FluxDType::StructContainer.as_u8(),
                 children,
                 column_id: u16::MAX,
+                field_id: None,
             }
         }
         DataType::List(field) => {
@@ -934,6 +979,7 @@ fn flatten_to_pending(
                 dtype_tag: FluxDType::ListContainer.as_u8(),
                 children,
                 column_id: u16::MAX,
+                field_id: None,
             }
         }
         DataType::Map(_, _) => {
@@ -963,6 +1009,7 @@ fn flatten_to_pending(
                 dtype_tag: FluxDType::MapContainer.as_u8(),
                 children: vec![lengths_desc, keys_desc, values_desc],
                 column_id: u16::MAX,
+                field_id: None,
             }
         }
         // Leaf type.
@@ -989,6 +1036,7 @@ fn collect_leaf(
         dtype_tag: dtype_tag.as_u8(),
         children: Vec::new(),
         column_id: col_id,
+        field_id: None,
     }
 }
 

@@ -104,6 +104,17 @@ pub struct FileManifest {
     #[serde(default)]
     pub spec_id: u32,
 
+    /// Which logical schema this file was written under.
+    ///
+    /// `None` for pre-evolution files; readers treat a missing
+    /// `schema_id` as implicit `schema_id = 0`. Only a `u32` is stored
+    /// per file — the full [`TableSchema`] lives once per evolution in a
+    /// `schema` action in the log.
+    ///
+    /// [`TableSchema`]: crate::txn::TableSchema
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<u32>,
+
     /// Number of rows in this file.
     #[serde(default)]
     pub row_count: u64,
@@ -112,9 +123,22 @@ pub struct FileManifest {
     #[serde(default)]
     pub file_size_bytes: u64,
 
-    /// Per-column statistics for data skipping.
+    /// Per-column statistics for data skipping, keyed by column
+    /// *name* (the classical form, present in every pre-Phase-E
+    /// manifest).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_stats: HashMap<String, ColumnStats>,
+
+    /// Per-column statistics keyed by logical `field_id` (Phase E).
+    ///
+    /// Optional mirror of [`FileManifest::column_stats`] that is
+    /// rename-safe and avoids a name-lookup through the schema chain.
+    /// When both maps are present, readers prefer this one; when
+    /// absent, readers fall back to the name-keyed map. New writers
+    /// should populate both during the Phase E → Phase F transition
+    /// so older readers continue to find their stats.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub column_stats_by_field_id: HashMap<u32, ColumnStats>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +146,7 @@ pub struct FileManifest {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Top-level table metadata stored in `_flux_meta.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableMeta {
     /// Unique table identifier.
     #[serde(default = "default_table_id")]
@@ -135,6 +159,18 @@ pub struct TableMeta {
     /// The currently active partition spec ID.
     #[serde(default)]
     pub current_spec_id: u32,
+
+    /// The currently active logical schema identifier.
+    ///
+    /// `None` on pre-evolution tables; readers treat that as implicit
+    /// `schema_id = 0`. The full [`TableSchema`] lives in a `schema`
+    /// action in the log rather than embedded here — this keeps the
+    /// cached metadata file small and avoids duplicating the schema
+    /// payload on every commit.
+    ///
+    /// [`TableSchema`]: crate::txn::TableSchema
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_schema_id: Option<u32>,
 
     /// Columns used for liquid clustering / Z-Order optimization.
     #[serde(default)]
@@ -158,6 +194,7 @@ impl Default for TableMeta {
             table_id: default_table_id(),
             partition_specs: Vec::new(),
             current_spec_id: 0,
+            current_schema_id: None,
             clustering_columns: Vec::new(),
             properties: HashMap::new(),
         }
@@ -219,10 +256,15 @@ mod tests {
             path: "data/part-0042.flux".into(),
             partition_values: [("country".into(), Some("US".into()))].into(),
             spec_id: 0,
+            schema_id: Some(3),
             row_count: 500_000,
             file_size_bytes: 25_000_000,
             column_stats: [(
                 "revenue".into(),
+                ColumnStats { min: Some("0.0".into()), max: Some("49999.5".into()), null_count: 0 },
+            )].into(),
+            column_stats_by_field_id: [(
+                7u32,
                 ColumnStats { min: Some("0.0".into()), max: Some("49999.5".into()), null_count: 0 },
             )].into(),
         };
@@ -232,11 +274,44 @@ mod tests {
     }
 
     #[test]
+    fn file_manifest_legacy_without_schema_id() {
+        // A manifest written by a pre-Phase-A writer must still parse
+        // cleanly (schema_id and column_stats_by_field_id omitted
+        // entirely).
+        let json = r#"{
+            "path": "data/part-0000.flux",
+            "spec_id": 0,
+            "row_count": 1000,
+            "file_size_bytes": 2048
+        }"#;
+        let parsed: FileManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.schema_id, None);
+        assert_eq!(parsed.path, "data/part-0000.flux");
+        assert!(parsed.column_stats_by_field_id.is_empty());
+    }
+
+    #[test]
     fn table_meta_defaults() {
         let meta = TableMeta::default();
         assert!(meta.table_id.starts_with("flux-"));
         assert!(meta.partition_specs.is_empty());
         assert!(meta.clustering_columns.is_empty());
+        assert_eq!(meta.current_schema_id, None);
+    }
+
+    #[test]
+    fn table_meta_legacy_without_schema_id() {
+        // Existing `_flux_meta.json` files must still deserialize.
+        let json = r#"{
+            "table_id": "flux-legacy",
+            "partition_specs": [],
+            "current_spec_id": 0,
+            "clustering_columns": [],
+            "properties": {}
+        }"#;
+        let parsed: TableMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.current_schema_id, None);
+        assert_eq!(parsed.table_id, "flux-legacy");
     }
 
     #[test]

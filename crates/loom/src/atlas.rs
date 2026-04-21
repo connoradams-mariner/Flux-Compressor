@@ -158,6 +158,14 @@ pub struct ColumnDescriptor {
     pub children: Vec<ColumnDescriptor>,
     /// Leaf column ID mapping to `BlockMeta.column_id`. `u16::MAX` for containers.
     pub column_id: u16,
+    /// Phase E: logical `field_id` from the table's `TableSchema`.
+    ///
+    /// `None` on pre-Phase-E files and on columns the writer didn't
+    /// have a field_id for (e.g. ad-hoc compressions that don't
+    /// originate from a FluxTable schema). Serialised only when set
+    /// so old `.flux` files stay byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_id: Option<u32>,
 }
 
 /// The complete Atlas footer: a list of [`BlockMeta`] entries plus a trailer.

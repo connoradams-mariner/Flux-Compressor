@@ -35,6 +35,8 @@ use crate::{
     decompressors::block_reader::{decompress_block, decompress_block_to_u64},
     error::{FluxError, FluxResult},
     traits::{LoomDecompressor, Predicate},
+    txn::projection::{ColumnPlan, FilePlan},
+    txn::schema::DefaultValue,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,6 +161,154 @@ impl FluxReader {
         let file = std::fs::File::open(path).map_err(FluxError::Io)?;
         let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(FluxError::Io)?;
         Self::read_schema(&mmap)
+    }
+
+    /// Decompress a `.flux` file against a schema-evolution
+    /// [`FilePlan`], producing a batch in the caller's target schema.
+    ///
+    /// This is the Phase B projection entry point:
+    /// * Only `plan.file_physical_columns` are decoded — dropped
+    ///   columns are I/O-skipped.
+    /// * Decoded columns are renamed as the plan specifies.
+    /// * Added fields are materialised via
+    ///   [`arrow_array::new_null_array`] (NULL) or a scalar broadcast
+    ///   of the configured literal default. Both are branch-free and
+    ///   do not allocate per-row data buffers.
+    ///
+    /// When `plan.is_pure_fill()`, the file is not opened at all and
+    /// the batch is synthesised from the plan's row counts alone.
+    pub fn decompress_with_plan(
+        &self,
+        data: &[u8],
+        predicate: &Predicate,
+        plan: &FilePlan,
+    ) -> FluxResult<RecordBatch> {
+        // Step 1: decode the physical columns the plan needs. We use a
+        // reader whose `column_name` matches the sole physical column
+        // when there's one — that way single-column flat files (where
+        // the footer has no schema tree) come back named correctly.
+        let physical_batch: Option<RecordBatch> = if plan.file_physical_columns.is_empty() {
+            None
+        } else {
+            let reader = if plan.file_physical_columns.len() == 1 {
+                FluxReader::new(&plan.file_physical_columns[0])
+            } else {
+                self.clone()
+            };
+            Some(reader.decompress_projected(data, predicate, &plan.file_physical_columns)?)
+        };
+
+        // Step 2: resolve row count. Decoded batch wins if any; else
+        // fall back to the plan's Fill row_count; else peek the
+        // file's footer (guards against legacy manifests with 0).
+        let row_count: usize = match &physical_batch {
+            Some(b) => b.num_rows(),
+            None => {
+                let plan_rc = plan
+                    .columns
+                    .iter()
+                    .find_map(|c| match c {
+                        ColumnPlan::Fill { row_count, .. } => Some(*row_count as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                if plan_rc == 0 && !data.is_empty() {
+                    let footer = AtlasFooter::from_file_tail(data)?;
+                    footer.blocks.iter().map(|b| b.value_count as usize).sum()
+                } else {
+                    plan_rc
+                }
+            }
+        };
+
+        // Step 3: assemble the output batch in target-schema order.
+        let mut out_columns: Vec<ArrayRef> = Vec::with_capacity(plan.columns.len());
+        let mut out_fields: Vec<Field> = Vec::with_capacity(plan.columns.len());
+
+        for c in &plan.columns {
+            match c {
+                ColumnPlan::Decode {
+                    physical_name,
+                    target_name,
+                    source_dtype,
+                    target_dtype,
+                    target_nullable,
+                } => {
+                    let batch = physical_batch.as_ref().ok_or_else(|| {
+                        FluxError::Internal(
+                            "plan has Decode but file_physical_columns is empty".into(),
+                        )
+                    })?;
+                    let idx = batch
+                        .schema()
+                        .index_of(physical_name)
+                        .map_err(FluxError::Arrow)?;
+                    let raw = batch.column(idx).clone();
+                    // Phase C: when the plan declares a different
+                    // source dtype, widen with a single arrow cast.
+                    // Same-dtype is the common path and stays
+                    // zero-copy (cloned Arc).
+                    let (column, field_dtype) = if source_dtype == target_dtype {
+                        (raw, target_dtype.to_arrow())
+                    } else {
+                        let cast_to = source_dtype
+                            .cast_target_arrow_dtype(*target_dtype)
+                            .ok_or_else(|| {
+                                FluxError::SchemaEvolution(format!(
+                                    "reader refused promotion {:?} → {:?}; plan \
+                                     was built with an unsupported pair",
+                                    source_dtype, target_dtype,
+                                ))
+                            })?;
+                        let cast =
+                            arrow::compute::cast(raw.as_ref(), &cast_to)
+                                .map_err(FluxError::Arrow)?;
+                        (cast, cast_to)
+                    };
+                    out_columns.push(column);
+                    out_fields.push(Field::new(
+                        target_name,
+                        field_dtype,
+                        *target_nullable,
+                    ));
+                }
+                ColumnPlan::Fill {
+                    target_name,
+                    target_dtype,
+                    target_nullable,
+                    default,
+                    ..
+                } => {
+                    let arr = materialize_fill(*target_dtype, default.as_ref(), row_count)?;
+                    out_columns.push(arr);
+                    out_fields.push(Field::new(
+                        target_name,
+                        target_dtype.to_arrow(),
+                        *target_nullable,
+                    ));
+                }
+            }
+        }
+
+        let schema = Arc::new(Schema::new(out_fields));
+        RecordBatch::try_new(schema, out_columns).map_err(FluxError::Arrow)
+    }
+
+    /// Convenience: plan-driven decompress from a file path via mmap.
+    pub fn decompress_file_with_plan(
+        &self,
+        path: &std::path::Path,
+        predicate: &Predicate,
+        plan: &FilePlan,
+    ) -> FluxResult<RecordBatch> {
+        if plan.is_pure_fill() {
+            // No file I/O necessary — the plan fully describes the
+            // synthesised batch.
+            return self.decompress_with_plan(&[], predicate, plan);
+        }
+        let file = std::fs::File::open(path).map_err(FluxError::Io)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(FluxError::Io)?;
+        self.decompress_with_plan(&mmap, predicate, plan)
     }
 }
 
@@ -574,6 +724,116 @@ fn empty_batch(col_name: &str) -> FluxResult<RecordBatch> {
     ]));
     let array = Arc::new(UInt64Array::from(Vec::<u64>::new()));
     RecordBatch::try_new(schema, vec![array]).map_err(FluxError::Arrow)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase B Fill materialisation: NULL / literal-default synthesis
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a projected column of `row_count` rows for a Phase B
+/// `Fill` plan entry.
+///
+/// NULL fills use [`arrow_array::new_null_array`], which only
+/// allocates the null mask. Literal defaults build a typed array via
+/// scalar broadcast; unsupported dtype/literal pairings surface as
+/// [`FluxError::SchemaEvolution`] so the scan fails fast rather than
+/// silently mis-decoding.
+fn materialize_fill(
+    dtype: FluxDType,
+    default: Option<&DefaultValue>,
+    row_count: usize,
+) -> FluxResult<ArrayRef> {
+    use arrow_array::new_null_array;
+    let arrow_dt = dtype.to_arrow();
+    match default {
+        None => Ok(new_null_array(&arrow_dt, row_count)),
+        Some(v) => materialize_literal(dtype, v, row_count),
+    }
+}
+
+fn materialize_literal(
+    dtype: FluxDType,
+    v: &DefaultValue,
+    n: usize,
+) -> FluxResult<ArrayRef> {
+    match (dtype, v) {
+        (FluxDType::Boolean, DefaultValue::Bool(b)) => {
+            Ok(Arc::new(BooleanArray::from(vec![*b; n])))
+        }
+        (FluxDType::Int64, DefaultValue::Int(i)) => {
+            Ok(Arc::new(Int64Array::from(vec![*i; n])))
+        }
+        (FluxDType::Int32, DefaultValue::Int(i)) => {
+            let v = i32::try_from(*i).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {i} overflows Int32"
+                ))
+            })?;
+            Ok(Arc::new(Int32Array::from(vec![v; n])))
+        }
+        (FluxDType::Int16, DefaultValue::Int(i)) => {
+            let v = i16::try_from(*i).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {i} overflows Int16"
+                ))
+            })?;
+            Ok(Arc::new(Int16Array::from(vec![v; n])))
+        }
+        (FluxDType::Int8, DefaultValue::Int(i)) => {
+            let v = i8::try_from(*i).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {i} overflows Int8"
+                ))
+            })?;
+            Ok(Arc::new(Int8Array::from(vec![v; n])))
+        }
+        (FluxDType::UInt64, DefaultValue::UInt(u)) => {
+            Ok(Arc::new(UInt64Array::from(vec![*u; n])))
+        }
+        (FluxDType::UInt64, DefaultValue::Int(i)) if *i >= 0 => {
+            Ok(Arc::new(UInt64Array::from(vec![*i as u64; n])))
+        }
+        (FluxDType::UInt32, DefaultValue::UInt(u)) => {
+            let v = u32::try_from(*u).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {u} overflows UInt32"
+                ))
+            })?;
+            Ok(Arc::new(UInt32Array::from(vec![v; n])))
+        }
+        (FluxDType::UInt16, DefaultValue::UInt(u)) => {
+            let v = u16::try_from(*u).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {u} overflows UInt16"
+                ))
+            })?;
+            Ok(Arc::new(UInt16Array::from(vec![v; n])))
+        }
+        (FluxDType::UInt8, DefaultValue::UInt(u)) => {
+            let v = u8::try_from(*u).map_err(|_| {
+                FluxError::SchemaEvolution(format!(
+                    "literal default {u} overflows UInt8"
+                ))
+            })?;
+            Ok(Arc::new(UInt8Array::from(vec![v; n])))
+        }
+        (FluxDType::Float64, DefaultValue::Float(f)) => {
+            Ok(Arc::new(Float64Array::from(vec![*f; n])))
+        }
+        (FluxDType::Float32, DefaultValue::Float(f)) => {
+            Ok(Arc::new(Float32Array::from(vec![*f as f32; n])))
+        }
+        (FluxDType::Utf8, DefaultValue::String(s)) => {
+            // StringArray::from(Vec<&str>) builds a single contiguous
+            // value buffer with shared offsets — linear in `n`, no
+            // per-row allocation.
+            let vals: Vec<&str> = (0..n).map(|_| s.as_str()).collect();
+            Ok(Arc::new(StringArray::from(vals)))
+        }
+        _ => Err(FluxError::SchemaEvolution(format!(
+            "literal default {v:?} incompatible with dtype {dtype:?}"
+        ))),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

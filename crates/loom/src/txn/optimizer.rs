@@ -145,12 +145,14 @@ mod tests {
             path: path.into(),
             partition_values: HashMap::new(),
             spec_id: 0,
+            schema_id: None,
             row_count: 1000,
             file_size_bytes: 10000,
             column_stats: [(
                 col.into(),
                 ColumnStats { min: Some(min.into()), max: Some(max.into()), null_count: 0 },
             )].into(),
+            column_stats_by_field_id: Default::default(),
         }
     }
 

@@ -1923,8 +1923,16 @@ mod tests {
         // Column large enough that FSST training amortises; URLs are a
         // classic win for FSST since they have repeated substrings. We
         // scramble row order so front-coding doesn't steal the test.
+        //
+        // The session mixer uses `wrapping_mul` on purpose: for i up to
+        // 20_000 the product with the Knuth multiplicative constant
+        // exceeds u64::MAX, and under debug overflow checks the naive
+        // `*` would panic. We only need a deterministic pseudo-random
+        // 64-bit session id per row, so wrapping arithmetic is the
+        // intended semantics.
         let base: Vec<String> = (0..20_000).map(|i| {
-            format!("https://api.example.com/v1/users/{}?session={:016x}", i, (i as u64) * 0x9E37_79B9_7F4A_7C15)
+            let session = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            format!("https://api.example.com/v1/users/{i}?session={session:016x}")
         }).collect();
         let idx = scrambled_indices(base.len());
         let strings: Vec<String> = idx.iter().map(|&i| base[i].clone()).collect();

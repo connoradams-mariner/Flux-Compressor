@@ -12,50 +12,54 @@ use arrow_schema::{DataType, TimeUnit};
 ///
 /// This is a 1-byte tag written into the Atlas footer so the decompressor
 /// knows how to reconstruct the original Arrow array type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The `serde` representation uses stable lower-case spellings
+/// (e.g. `"uint64"`, `"utf8"`, `"timestamp_micros"`). The spellings are
+/// part of the on-disk schema-evolution log format and must not change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum FluxDType {
     // ── Unsigned integers ────────────────────────────────────────────────
-    UInt8   = 0x00,
-    UInt16  = 0x01,
-    UInt32  = 0x02,
-    UInt64  = 0x03,
+    #[serde(rename = "uint8")]  UInt8   = 0x00,
+    #[serde(rename = "uint16")] UInt16  = 0x01,
+    #[serde(rename = "uint32")] UInt32  = 0x02,
+    #[serde(rename = "uint64")] UInt64  = 0x03,
 
     // ── Signed integers ──────────────────────────────────────────────────
-    Int8    = 0x04,
-    Int16   = 0x05,
-    Int32   = 0x06,
-    Int64   = 0x07,
+    #[serde(rename = "int8")]  Int8  = 0x04,
+    #[serde(rename = "int16")] Int16 = 0x05,
+    #[serde(rename = "int32")] Int32 = 0x06,
+    #[serde(rename = "int64")] Int64 = 0x07,
 
     // ── Floating point ───────────────────────────────────────────────────
-    Float32 = 0x08,
-    Float64 = 0x09,
+    #[serde(rename = "float32")] Float32 = 0x08,
+    #[serde(rename = "float64")] Float64 = 0x09,
 
     // ── Boolean / Date / Time ────────────────────────────────────────────
-    Boolean          = 0x0A,
-    Date32           = 0x0B,
-    Date64           = 0x0C,
-    TimestampSecond  = 0x0D,
-    TimestampMillis  = 0x0E,
-    TimestampMicros  = 0x0F,
-    TimestampNanos   = 0x10,
+    #[serde(rename = "boolean")]          Boolean          = 0x0A,
+    #[serde(rename = "date32")]           Date32           = 0x0B,
+    #[serde(rename = "date64")]           Date64           = 0x0C,
+    #[serde(rename = "timestamp_second")] TimestampSecond  = 0x0D,
+    #[serde(rename = "timestamp_millis")] TimestampMillis  = 0x0E,
+    #[serde(rename = "timestamp_micros")] TimestampMicros  = 0x0F,
+    #[serde(rename = "timestamp_nanos")]  TimestampNanos   = 0x10,
 
     // ── Decimal ──────────────────────────────────────────────────────────
-    Decimal128 = 0x11,
+    #[serde(rename = "decimal128")] Decimal128 = 0x11,
 
     // ── Variable-length (Tier 2) ─────────────────────────────────────────
-    Utf8        = 0x20,
-    LargeUtf8   = 0x21,
-    Binary      = 0x22,
-    LargeBinary = 0x23,
+    #[serde(rename = "utf8")]         Utf8        = 0x20,
+    #[serde(rename = "large_utf8")]   LargeUtf8   = 0x21,
+    #[serde(rename = "binary")]       Binary      = 0x22,
+    #[serde(rename = "large_binary")] LargeBinary = 0x23,
 
     // ── Internal: offset column for List/Map ─────────────────────────────
-    Offsets = 0x30,
+    #[serde(rename = "offsets")] Offsets = 0x30,
 
     // ── Nested containers (Tier 3) ───────────────────────────────────────
-    StructContainer = 0x40,
-    ListContainer   = 0x41,
-    MapContainer    = 0x42,
+    #[serde(rename = "struct")] StructContainer = 0x40,
+    #[serde(rename = "list")]   ListContainer   = 0x41,
+    #[serde(rename = "map")]    MapContainer    = 0x42,
 }
 
 impl FluxDType {
@@ -178,6 +182,72 @@ impl FluxDType {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// Phase C: is `self → target` a permitted schema-evolution
+    /// promotion?
+    ///
+    /// Allowed promotions (reader-side widening; no data rewrite):
+    /// * Signed: `Int8 → Int16 → Int32 → Int64 → Decimal128`.
+    /// * Unsigned: `UInt8 → UInt16 → UInt32 → UInt64 → Decimal128`.
+    /// * Float: `Float32 → Float64`.
+    /// * Strings: `Utf8 → LargeUtf8`, `Binary → LargeBinary`.
+    /// * Identity: any dtype → itself.
+    ///
+    /// Everything else — narrowing, cross-family, sign changes, scale
+    /// changes, `Decimal128 → anything smaller` — is rejected and
+    /// lives behind a `SchemaEvolution` error at validate time.
+    ///
+    /// `Float128` and `Decimal256` extensions are tracked in
+    /// `docs/roadmap-f128.md` and slot into this helper when the
+    /// on-disk carriers land.
+    pub fn can_promote_to(self, target: Self) -> bool {
+        use FluxDType::*;
+        if self == target {
+            return true;
+        }
+        matches!(
+            (self, target),
+            // Signed integer widening.
+            (Int8,  Int16) | (Int8,  Int32) | (Int8,  Int64) | (Int8,  Decimal128)
+          | (Int16, Int32) | (Int16, Int64) | (Int16, Decimal128)
+          | (Int32, Int64) | (Int32, Decimal128)
+          | (Int64, Decimal128)
+            // Unsigned integer widening.
+          | (UInt8,  UInt16) | (UInt8,  UInt32) | (UInt8,  UInt64) | (UInt8,  Decimal128)
+          | (UInt16, UInt32) | (UInt16, UInt64) | (UInt16, Decimal128)
+          | (UInt32, UInt64) | (UInt32, Decimal128)
+          | (UInt64, Decimal128)
+            // Float widening.
+          | (Float32, Float64)
+            // String / binary length widening.
+          | (Utf8, LargeUtf8)
+          | (Binary, LargeBinary)
+        )
+    }
+
+    /// Arrow [`DataType`] to cast to when promoting from `self` to
+    /// `target`. Returns `None` when the pair is not a permitted
+    /// promotion.
+    ///
+    /// For integer → `Decimal128` the target is pinned to
+    /// `Decimal128(38, 0)` — the canonical 128-bit integer carrier
+    /// with no fractional scale — which differs from the default
+    /// `FluxDType::Decimal128.to_arrow()` mapping (`(38, 10)`). We
+    /// want the whole integer value to land in the integer portion
+    /// of the decimal; scaling is Phase C.2 territory.
+    pub fn cast_target_arrow_dtype(self, target: Self) -> Option<DataType> {
+        if !self.can_promote_to(target) {
+            return None;
+        }
+        if self == target {
+            return Some(self.to_arrow());
+        }
+        if matches!(target, FluxDType::Decimal128) {
+            // Scale 0 for IntN / UIntN → Decimal128.
+            return Some(DataType::Decimal128(38, 0));
+        }
+        Some(target.to_arrow())
+    }
 }
 
 #[cfg(test)]
@@ -214,5 +284,104 @@ mod tests {
             FluxDType::from_arrow(&DataType::Timestamp(TimeUnit::Microsecond, None)),
             Some(FluxDType::TimestampMicros),
         );
+    }
+
+    // ── Phase C: promotion matrix ───────────────────────────────────────
+
+    #[test]
+    fn identity_promotion_allowed() {
+        for t in [
+            FluxDType::Int8, FluxDType::Int16, FluxDType::Int32, FluxDType::Int64,
+            FluxDType::UInt8, FluxDType::UInt16, FluxDType::UInt32, FluxDType::UInt64,
+            FluxDType::Float32, FluxDType::Float64,
+            FluxDType::Utf8, FluxDType::LargeUtf8,
+            FluxDType::Binary, FluxDType::LargeBinary,
+            FluxDType::Decimal128, FluxDType::Boolean,
+        ] {
+            assert!(t.can_promote_to(t), "identity should be allowed for {t:?}");
+        }
+    }
+
+    #[test]
+    fn signed_widening_allowed_up_through_decimal128() {
+        for (s, t) in [
+            (FluxDType::Int8,  FluxDType::Int16),
+            (FluxDType::Int8,  FluxDType::Int32),
+            (FluxDType::Int8,  FluxDType::Int64),
+            (FluxDType::Int8,  FluxDType::Decimal128),
+            (FluxDType::Int16, FluxDType::Int32),
+            (FluxDType::Int16, FluxDType::Int64),
+            (FluxDType::Int16, FluxDType::Decimal128),
+            (FluxDType::Int32, FluxDType::Int64),
+            (FluxDType::Int32, FluxDType::Decimal128),
+            (FluxDType::Int64, FluxDType::Decimal128),
+        ] {
+            assert!(s.can_promote_to(t), "{s:?} → {t:?} should be allowed");
+        }
+    }
+
+    #[test]
+    fn unsigned_widening_allowed_up_through_decimal128() {
+        for (s, t) in [
+            (FluxDType::UInt8,  FluxDType::UInt16),
+            (FluxDType::UInt8,  FluxDType::UInt32),
+            (FluxDType::UInt8,  FluxDType::UInt64),
+            (FluxDType::UInt8,  FluxDType::Decimal128),
+            (FluxDType::UInt16, FluxDType::UInt32),
+            (FluxDType::UInt16, FluxDType::UInt64),
+            (FluxDType::UInt16, FluxDType::Decimal128),
+            (FluxDType::UInt32, FluxDType::UInt64),
+            (FluxDType::UInt32, FluxDType::Decimal128),
+            (FluxDType::UInt64, FluxDType::Decimal128),
+        ] {
+            assert!(s.can_promote_to(t), "{s:?} → {t:?} should be allowed");
+        }
+    }
+
+    #[test]
+    fn float_and_string_widening_allowed() {
+        assert!(FluxDType::Float32.can_promote_to(FluxDType::Float64));
+        assert!(FluxDType::Utf8.can_promote_to(FluxDType::LargeUtf8));
+        assert!(FluxDType::Binary.can_promote_to(FluxDType::LargeBinary));
+    }
+
+    #[test]
+    fn narrowing_and_cross_family_rejected() {
+        // Narrowing.
+        assert!(!FluxDType::Int64.can_promote_to(FluxDType::Int32));
+        assert!(!FluxDType::UInt64.can_promote_to(FluxDType::UInt32));
+        assert!(!FluxDType::Float64.can_promote_to(FluxDType::Float32));
+        assert!(!FluxDType::LargeUtf8.can_promote_to(FluxDType::Utf8));
+        // Sign changes.
+        assert!(!FluxDType::Int32.can_promote_to(FluxDType::UInt32));
+        assert!(!FluxDType::UInt32.can_promote_to(FluxDType::Int32));
+        // Family changes.
+        assert!(!FluxDType::Int32.can_promote_to(FluxDType::Float32));
+        assert!(!FluxDType::Float64.can_promote_to(FluxDType::Int64));
+        assert!(!FluxDType::Decimal128.can_promote_to(FluxDType::Int64));
+        // Float → Decimal128 not allowed (lossy), Decimal128 → Float not allowed.
+        assert!(!FluxDType::Float32.can_promote_to(FluxDType::Decimal128));
+        assert!(!FluxDType::Decimal128.can_promote_to(FluxDType::Float64));
+    }
+
+    #[test]
+    fn int_to_decimal128_casts_with_scale_zero() {
+        // The 128-bit integer carrier must pin scale=0 so integer values
+        // land in the integer part, not scaled by 10^10.
+        let target = FluxDType::Int64
+            .cast_target_arrow_dtype(FluxDType::Decimal128)
+            .unwrap();
+        assert_eq!(target, DataType::Decimal128(38, 0));
+
+        let target_u = FluxDType::UInt64
+            .cast_target_arrow_dtype(FluxDType::Decimal128)
+            .unwrap();
+        assert_eq!(target_u, DataType::Decimal128(38, 0));
+    }
+
+    #[test]
+    fn cast_target_returns_none_on_rejected_pair() {
+        assert!(FluxDType::Int64.cast_target_arrow_dtype(FluxDType::Int32).is_none());
+        assert!(FluxDType::Float64.cast_target_arrow_dtype(FluxDType::Int64).is_none());
     }
 }

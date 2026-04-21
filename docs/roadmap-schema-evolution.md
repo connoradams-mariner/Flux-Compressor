@@ -237,24 +237,45 @@ no `schema` action and conflict only on `remove`.
   yet; this is just plumbing.
 - **Phase B — add / drop / rename** (default-null only). Implementable
   without touching the decode pipeline; everything is NULL synthesis.
+  Projection resolves `field_id` via the replayed schema chain; the
+  physical `.flux` footer is still name-keyed at this phase.
 - **Phase C — type promotion**. Requires decoder changes across the
   Rust pipeline to accept a target dtype. Can land incrementally
   (start with i32 → i64, add float widening, then decimal).
 - **Phase D — nullability tightening with proof**. Requires writer to
   consult manifests for null_count evidence before committing the
   evolution.
+- **Phase E — physical field_id adoption**. Stamp `field_id` into the
+  `.flux` footer's `ColumnDescriptor` (alongside the current `name` +
+  `dtype_tag`) and key `file_manifests[*].column_stats` by `field_id`
+  rather than by name. Unlocks rename-safe stats pruning and removes
+  the last name-based lookup from the read path, so scans become
+  fully `field_id`-dispatched. Bumps `writer_min_version` on the
+  `protocol` action because old readers cannot consume the new
+  footer shape.
+- **Phase F — Python surface**. Propagate Phase A–E semantics into
+  `FluxTableWriter` / Polars bindings: `schema=` constructor
+  argument, `evolve_schema()` method, reader-side projection through
+  the PyO3 layer, and test coverage on the Python side. No on-disk
+  format change — this is surface work on top of the Rust core.
+- **Phase G — JVM / JNI surface**. Propagate the same semantics to
+  the `crates/jni-bridge` crate for the Spark connector: schema
+  evolution calls, stamped-manifest commit paths, and scan-time
+  projection via the JNI boundary. No on-disk format change.
 
 ## Open questions
 
 - **Default values for non-nullable adds**: do we allow arbitrary
   expressions (`now()`, `uuid()`) or only literals? Literals are
   simpler and what Delta supports for `ADD COLUMN ... DEFAULT`.
+  Phase B lands literals only; expressions remain open.
 - **Schema fingerprinting**: should we hash the field_id-sorted fields
   list for de-dup so two identical schemas don't bloat the log? Not
   strictly needed but nice for cheap equality checks.
 - **Cross-file schema stats**: column_stats in file manifests are
-  keyed by name today; we'll need to key them by `field_id` (or carry
-  both) so stats survive renames.
+  keyed by name today; they will be re-keyed by `field_id` in
+  **Phase E** so stats survive renames and stay pruneable through
+  evolution.
 - **Partition column evolution**: Iceberg lets you evolve partition
   specs independently of the data schema. We already have that split
   (`spec_id` vs `schema_id`), but the CLI / docs don't yet expose it
