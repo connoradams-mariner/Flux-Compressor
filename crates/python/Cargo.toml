@@ -15,8 +15,9 @@ name       = "fluxcompress"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Alias `flux-loom` back to `loom` for the PyO3 extension.
-loom         = { path = "../loom", package = "flux-loom", version = "0.5.3" }
+# Alias `flux-loom` back to `loom` for the PyO3 extension. Version
+# pin is at the workspace level.
+loom         = { workspace = true }
 pyo3         = { version = "0.21", features = ["extension-module", "abi3-py38"] }
 arrow        = { workspace = true, features = ["pyarrow"] }
 arrow-array  = { workspace = true }

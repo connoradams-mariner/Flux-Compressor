@@ -102,7 +102,82 @@ public final class FluxNative {
      */
     public static native long[][] decompressU128(byte[] fluxData);
 
-    // ── Convenience helpers ──────────────────────────────────────────────────
+    // ── Layer 2: multi-column Arrow IPC batch ──────────────────────────────────
+
+    /**
+     * Compress an Arrow IPC stream payload (output of
+     * {@code ArrowStreamWriter}) into {@code .flux} bytes.
+     *
+     * @param  ipcBatch Arrow IPC stream bytes containing a single record batch.
+     * @param  profile  {@code "speed"} | {@code "balanced"} | {@code "archive"} | {@code "brotli"}.
+     * @return          Compressed {@code .flux} bytes.
+     */
+    public static native byte[] compressTable(byte[] ipcBatch, String profile);
+
+    /**
+     * Decompress {@code .flux} bytes back to an Arrow IPC stream payload
+     * that the Java side reads with {@code ArrowStreamReader}.
+     *
+     * @param  fluxData Compressed {@code .flux} bytes.
+     * @return          Arrow IPC stream bytes.
+     */
+    public static native byte[] decompressTable(byte[] fluxData);
+
+    // ── Layer 3: FluxTable handle API ───────────────────────────────────────────
+
+    /**
+     * Open (or create) a {@code FluxTable} at the given filesystem path.
+     *
+     * @param  path Directory path for the {@code .fluxtable/} directory.
+     * @return      Opaque handle (&gt; 0). Caller must call {@link #tableClose(long)}.
+     */
+    public static native long tableOpen(String path);
+
+    /**
+     * Append pre-compressed {@code .flux} bytes to an open table.
+     *
+     * @param  handle   Handle returned by {@link #tableOpen(String)}.
+     * @param  fluxData Compressed {@code .flux} bytes (typically from {@link #compressTable}).
+     * @return          Transaction log version of the new append.
+     */
+    public static native long tableAppend(long handle, byte[] fluxData);
+
+    /**
+     * Scan all live files in the open table and return the result as a
+     * concatenated Arrow IPC stream.
+     *
+     * @param  handle Handle returned by {@link #tableOpen(String)}.
+     * @return        Arrow IPC stream bytes, or empty array for empty tables.
+     */
+    public static native byte[] tableScan(long handle);
+
+    /**
+     * Evolve the table's logical schema.
+     *
+     * @param  handle     Handle returned by {@link #tableOpen(String)}.
+     * @param  schemaJson JSON serialisation of a {@code TableSchema}.
+     * @return            Transaction log version of the schema-change entry.
+     */
+    public static native long tableEvolve(long handle, String schemaJson);
+
+    /**
+     * Close and release a table handle. After this call the handle is
+     * invalid; further use will throw.
+     *
+     * @param handle Handle returned by {@link #tableOpen(String)}.
+     */
+    public static native void tableClose(long handle);
+
+    /**
+     * Return the current (latest) committed version of an open table,
+     * or {@code -1} if the table has no committed transactions yet.
+     *
+     * @param  handle Handle returned by {@link #tableOpen(String)}.
+     * @return        Latest committed version number, or {@code -1}.
+     */
+    public static native long tableCurrentVersion(long handle);
+
+    // ── Convenience helpers ─────────────────────────────────────────────────
 
     /**
      * Allocate a direct {@link ByteBuffer} suitable for zero-copy transfer

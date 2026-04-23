@@ -96,7 +96,10 @@ jobs:
           # shellcheck source=/dev/null
           source .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install maturin pytest pyarrow polars
+          # `pytest-benchmark` is required by `test_benchmarks.py` + the
+          # `test_benchmark_*` cases in `test_core.py`; without it pytest
+          # records those as collection errors rather than skipping them.
+          pip install maturin pytest pytest-benchmark pyarrow polars
           # Expose the venv to subsequent steps by exporting its bin
           # dir onto GITHUB_PATH; `maturin develop` refuses to install
           # into the system Python, so it needs an active venv.

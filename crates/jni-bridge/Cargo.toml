@@ -14,9 +14,11 @@ name       = "flux_jni"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Pull `flux-loom` from crates.io / path, alias it as `loom` locally
-# so `use loom::…` inside this crate stays unchanged.
-loom         = { path = "../loom", package = "flux-loom", version = "0.5.3" }
+# Pull `flux-loom` from the workspace; alias it as `loom` locally so
+# `use loom::…` inside this crate stays unchanged. Version pin lives
+# in the workspace's `[workspace.dependencies] flux-loom = ...` so
+# bumping a release only touches the workspace `Cargo.toml`.
+loom         = { workspace = true }
 jni          = { version = "0.21", features = ["invocation"] }
 arrow        = { workspace = true }
 arrow-array  = { workspace = true }

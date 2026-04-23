@@ -14,8 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Alias `flux-loom` back to the short `loom` name so the CLI's
-# `use loom::…` imports stay identical.
-loom         = { path = "../loom", package = "flux-loom", version = "0.5.3" }
+# `use loom::…` imports stay identical. Version pin is at the
+# workspace level.
+loom         = { workspace = true }
 clap         = { workspace = true }
 polars       = { workspace = true }
 arrow        = { workspace = true }

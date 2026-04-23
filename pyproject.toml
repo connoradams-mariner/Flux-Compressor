@@ -4,10 +4,11 @@ build-backend = "maturin"
 
 [project]
 name        = "fluxcompress"
-version     = "0.5.3"
+version     = "0.5.4"
 description = "High-performance adaptive columnar compression for Python (Polars, Spark, PyArrow)"
 readme      = "README.md"
 license     = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
 authors     = [{ name = "FluxCompress Contributors" }]
 requires-python = ">=3.8"
 keywords    = ["compression", "columnar", "arrow", "parquet", "polars", "spark"]
@@ -71,6 +72,16 @@ features         = ["pyo3/abi3-py38"]
 
 # Strip debug symbols in release builds (smaller wheels).
 strip            = true
+
+# Ensure the root LICENSE is bundled into the sdist tarball at
+# `fluxcompress-<ver>/LICENSE`.  PyPI's warehouse validates that every
+# `License-File` entry in METADATA is actually present in the archive,
+# which otherwise fails when the sdist is built from
+# `crates/python/Cargo.toml` (two levels below repo root).
+include          = [
+    { path = "LICENSE",   format = "sdist" },
+    { path = "README.md", format = "sdist" },
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Development tooling

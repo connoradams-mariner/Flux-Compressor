@@ -129,7 +129,21 @@ jobs:
           PGP_SECRET: ${{ secrets.PGP_SECRET }}
         run: |
           mkdir -p ~/.gnupg
-          echo "$PGP_SECRET" | base64 -d | gpg --batch --import
+          chmod 700 ~/.gnupg
+          # Accept either a base64-encoded armoured key (recommended by
+          # our docs) or a raw armoured key pasted directly into the
+          # secret.  Try the base64 path first; if it doesn't decode
+          # cleanly, fall back to piping the raw secret to gpg.
+          if printf '%s' "$PGP_SECRET" | base64 -d 2>/dev/null \
+              | gpg --batch --import 2>&1 \
+              | tee /tmp/gpg-import.log \
+              | grep -q 'secret key imported\|processed: 1'; then
+            echo "PGP key imported from base64-encoded secret."
+          else
+            echo "Base64 decode failed - retrying with raw armoured key."
+            printf '%s' "$PGP_SECRET" | gpg --batch --import
+          fi
+          gpg --list-secret-keys --keyid-format=long
 
       - name: Publish signed artefact
         working-directory: spark-connector

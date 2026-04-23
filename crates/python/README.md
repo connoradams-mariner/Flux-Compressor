@@ -30,7 +30,7 @@ This crate is built by `maturin`; it is not a conventional Rust library and is t
 
 ```toml
 [dependencies]
-loom = { package = "flux-loom", version = "0.5.3" }
+loom = { package = "flux-loom", version = "0.5.4" }
 ```
 
 ## Building locally
