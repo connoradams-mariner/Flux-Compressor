@@ -1,0 +1,74 @@
+# release-please: automated semantic versioning + release cuts.
+#
+# ## How it works
+#
+# 1.  You push / merge a PR into `main` with a Conventional Commit
+#     title. Examples:
+#       * `feat: add null-aware compression wrapper`      -> minor bump
+#       * `fix: Spark 3.5.1 ArrowUtils signature`         -> patch bump
+#       * `feat!: remove legacy `compress_u64` API`       -> major bump
+#       * `chore: bump deps`                              -> no bump
+#       * `docs: clarify serverless limits`               -> no bump (but
+#                                                           still shows up
+#                                                           in CHANGELOG).
+# 2.  This workflow runs, parses the commit history since the last
+#     release tag, and opens (or updates) a long-lived PR titled
+#     `chore(main): release X.Y.Z` that:
+#       * Bumps the version in every file declared as `extra-files`
+#         in `release-please-config.json`.
+#       * Updates `CHANGELOG.md` with generated release notes.
+# 3.  When you merge that Release PR, this workflow fires again and
+#     creates a GitHub Release + a `vX.Y.Z` git tag.
+# 4.  The `vX.Y.Z` tag triggers the three existing release workflows
+#     (`release-crates.yml`, `release-pypi.yml`, `release-maven.yml`)
+#     exactly as before - nothing downstream changes.
+#
+# ## Branch protection notes
+#
+# * `main` is protected; normal work goes through `staging -> PR -> main`.
+# * release-please creates its own branch (`release-please--branches--main`)
+#   and opens a PR into main. Branch-protection rules that require
+#   status checks to pass will still apply to that PR.
+# * The `GITHUB_TOKEN` this action uses is the default job token.  It
+#   can write to the repo (PR creation, commits on the release branch,
+#   tagging).  No custom PAT required unless your protection rules
+#   disallow the default token from pushing - in which case you can
+#   set `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}` and create a fine-
+#   grained PAT with the relevant permissions.
+
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write        # needed to push commits + tags
+  pull-requests: write   # needed to open / update the release PR
+
+concurrency:
+  # Never have two release-please runs racing on `main`.
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Open / update release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # Monorepo-manifest mode - see `release-please-config.json`
+          # and `.release-please-manifest.json` in the repo root.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Optional visibility step: expose whether this run cut a new
+      # release so downstream jobs in other workflows can hook in.
+      - name: Show outputs
+        if: always()
+        run: |
+          echo "Release created: ${{ steps.release.outputs.release_created }}"
+          echo "Tag:             ${{ steps.release.outputs.tag_name }}"
+          echo "Version:         ${{ steps.release.outputs.version }}"

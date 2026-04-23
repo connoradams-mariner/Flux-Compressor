@@ -937,7 +937,8 @@ walkthrough including cluster scoping, init scripts, and troubleshooting.
   reuse training work.
 
 See also:
-- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md) — Phase H Spark DataSource V2 connector
+- [docs/release-process.md](docs/release-process.md) — how Conventional Commits + release-please drive versions
+- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md)
 - [docs/roadmap-mutations.md](docs/roadmap-mutations.md) — DELETE / UPDATE / MERGE via COW
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
 - [docs/roadmap-wal.md](docs/roadmap-wal.md) — Binary WAL migration
