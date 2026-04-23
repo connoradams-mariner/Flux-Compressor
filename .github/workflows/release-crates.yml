@@ -32,7 +32,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF##*/}"
           RAW=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name=="loom") | .version')
+            | jq -r '.packages[] | select(.name=="flux-loom") | .version')
           WORKSPACE_VER="v$RAW"
           echo "Tag: $TAG"
           echo "Workspace: $WORKSPACE_VER"
@@ -41,13 +41,13 @@ jobs:
             exit 1
           fi
 
-      - name: Dry-run publish loom
-        run: cargo publish -p loom --dry-run
+      - name: Dry-run publish flux-loom
+        run: cargo publish -p flux-loom --dry-run
 
-      - name: Publish loom
+      - name: Publish flux-loom
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p loom
+        run: cargo publish -p flux-loom
 
       - name: Wait for crates.io index
         run: sleep 30

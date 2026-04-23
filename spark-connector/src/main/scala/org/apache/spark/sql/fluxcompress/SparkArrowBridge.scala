@@ -24,13 +24,34 @@ import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnVector, Columna
  * only code in that package namespace can call them.  Everything the
  * connector exposes to users lives under `com.datamariners.fluxcompress.spark.*`;
  * this module is the thin Spark-private shim it calls into.
+ *
+ * The object is `public` (no visibility modifier) so the
+ * `com.datamariners.fluxcompress.spark.*` package can import it. The
+ * earlier `private[fluxcompress]` modifier restricted it to the
+ * `org.apache.spark.sql.fluxcompress` sub-package only, which broke
+ * the connector's cross-package call-sites.
  */
-private[fluxcompress] object SparkArrowBridge {
+object SparkArrowBridge {
 
   /** Timezone string used for Arrow timestamp vectors.  UTC keeps the
    *  on-disk representation timezone-stable and matches the JNI
    *  bridge's `FluxDType::TimestampMicros` mapping. */
-  private val TimeZone = "UTC"
+  val TimeZone = "UTC"
+
+  /**
+   * Build an Arrow schema from a Spark [[StructType]] via Spark's
+   * `private[sql]` [[ArrowUtils.toArrowSchema]]. Exposed so
+   * `FluxDataWriter` (outside this package) can use the same conversion
+   * without reaching into the private symbol directly.
+   *
+   * Uses the 2-argument signature (`schema, timeZoneId`) that ships in
+   * Spark 3.5.0 and 3.5.1.  The 4-arg variant that takes
+   * `errorOnDuplicatedFieldNames` / `largeVarTypes` was only added in
+   * Spark 3.5.2, so we target the lowest 3.5 minor for broadest
+   * Databricks runtime compatibility.
+   */
+  def toArrowSchema(schema: StructType): org.apache.arrow.vector.types.pojo.Schema =
+    ArrowUtils.toArrowSchema(schema, TimeZone)
 
   /**
    * Allocate a root Arrow allocator.  Callers are responsible for
@@ -53,7 +74,7 @@ private[fluxcompress] object SparkArrowBridge {
       schema: StructType,
       allocator: BufferAllocator,
   ): Array[Byte] = {
-    val arrowSchema = ArrowUtils.toArrowSchema(schema, TimeZone, errorOnDuplicatedFieldNames = false, largeVarTypes = false)
+    val arrowSchema = ArrowUtils.toArrowSchema(schema, TimeZone)
     val root        = VectorSchemaRoot.create(arrowSchema, allocator)
     val arrowWriter = ArrowWriter.create(root)
     try {

@@ -1007,12 +1007,39 @@ dependencies = [
  "arrow-schema",
  "byteorder",
  "criterion",
+ "flux-loom",
  "jni",
- "loom",
  "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "flux-loom"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "brotli 3.5.0",
+ "byteorder",
+ "crc32fast",
+ "criterion",
+ "fsst-rs",
+ "lz4_flex",
+ "memmap2 0.9.10",
+ "num-traits",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "zerocopy 0.7.35",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -1025,8 +1052,8 @@ dependencies = [
  "arrow-schema",
  "byteorder",
  "clap",
+ "flux-loom",
  "indicatif",
- "loom",
  "orc-rust",
  "parquet",
  "polars",
@@ -1046,7 +1073,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "byteorder",
- "loom",
+ "flux-loom",
  "pyo3",
  "serde_json",
  "thiserror",
@@ -1584,33 +1611,6 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
-
-[[package]]
-name = "loom"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "arrow",
- "arrow-array",
- "arrow-buffer",
- "arrow-schema",
- "brotli 3.5.0",
- "byteorder",
- "crc32fast",
- "criterion",
- "fsst-rs",
- "lz4_flex",
- "memmap2 0.9.10",
- "num-traits",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
- "zerocopy 0.7.35",
- "zstd 0.13.3",
-]
 
 [[package]]
 name = "lz4"

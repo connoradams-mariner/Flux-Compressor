@@ -12,7 +12,9 @@ name = "fluxcapacitor"
 path = "src/main.rs"
 
 [dependencies]
-loom         = { path = "../loom" }
+# Alias `flux-loom` back to the short `loom` name so the CLI's
+# `use loom::…` imports stay identical.
+loom         = { path = "../loom", package = "flux-loom", version = "0.5.0" }
 clap         = { workspace = true }
 polars       = { workspace = true }
 arrow        = { workspace = true }

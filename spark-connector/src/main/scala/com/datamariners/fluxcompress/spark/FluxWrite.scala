@@ -16,7 +16,11 @@ import org.apache.spark.sql.connector.write._
 import org.apache.spark.sql.execution.arrow.ArrowWriter
 import org.apache.spark.sql.fluxcompress.SparkArrowBridge
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.ArrowUtils
+// Note: we deliberately do NOT `import org.apache.spark.sql.util.ArrowUtils`
+// here. `ArrowUtils` is `private[sql]` in Spark 3.5, so a direct
+// reference from this package triggers a visibility error at
+// compile time.  `SparkArrowBridge` (under `org.apache.spark.sql.*`)
+// proxies the call for us.
 
 /**
  * Write side of the Flux DataSource V2 connector.
@@ -138,8 +142,10 @@ class FluxDataWriter(
     new RootAllocator(Long.MaxValue)
 
   // Arrow schema derived once — timezone UTC to match the Rust bridge.
-  private val arrowSchema =
-    ArrowUtils.toArrowSchema(schema, "UTC", errorOnDuplicatedFieldNames = false, largeVarTypes = false)
+  // Routed through `SparkArrowBridge` because `ArrowUtils` is
+  // `private[sql]` and can only be reached from the
+  // `org.apache.spark.sql.*` package tree.
+  private val arrowSchema = SparkArrowBridge.toArrowSchema(schema)
 
   private var root: VectorSchemaRoot = VectorSchemaRoot.create(arrowSchema, allocator)
   private var arrowWriter: ArrowWriter = ArrowWriter.create(root)

@@ -1,5 +1,10 @@
 [package]
-name        = "loom"
+# The crates.io name is `flux-loom` because `loom` is already owned by
+# tokio-rs (concurrency permutation testing). The `[lib] name` below
+# stays `loom` so every `use loom::…` inside the workspace keeps
+# working without a rename cascade, and downstream dependents do the
+# rename at the dependency line (`loom = { package = "flux-loom" }`).
+name        = "flux-loom"
 description = "FluxCompress core compression engine – adaptive columnar storage"
 version.workspace     = true
 edition.workspace     = true
