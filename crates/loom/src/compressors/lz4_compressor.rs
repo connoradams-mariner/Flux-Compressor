@@ -19,10 +19,10 @@
 //! Raw values are serialised as little-endian pairs of u64 (lo, hi) before
 //! compression, giving LZ4 the best opportunity to find repeated byte patterns.
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Write};
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use crate::error::{FluxError, FluxResult};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use std::io::{Cursor, Write};
 
 pub const TAG: u8 = 0x05;
 
@@ -55,16 +55,15 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     }
 
     let mut cur = Cursor::new(data);
-    let _tag              = cur.read_u8()?;
-    let _secondary_codec  = cur.read_u8()?;
-    let value_count       = cur.read_u32::<LittleEndian>()? as usize;
-    let _uncomp_len  = cur.read_u32::<LittleEndian>()? as usize;
-    let comp_len     = cur.read_u32::<LittleEndian>()? as usize;
-    let header_end   = cur.position() as usize;
+    let _tag = cur.read_u8()?;
+    let _secondary_codec = cur.read_u8()?;
+    let value_count = cur.read_u32::<LittleEndian>()? as usize;
+    let _uncomp_len = cur.read_u32::<LittleEndian>()? as usize;
+    let comp_len = cur.read_u32::<LittleEndian>()? as usize;
+    let header_end = cur.position() as usize;
 
     let compressed = &data[header_end..header_end + comp_len];
-    let raw = decompress_size_prepended(compressed)
-        .map_err(|e| FluxError::Lz4(e.to_string()))?;
+    let raw = decompress_size_prepended(compressed).map_err(|e| FluxError::Lz4(e.to_string()))?;
 
     if raw.len() < value_count * 16 {
         return Err(FluxError::BufferOverflow {

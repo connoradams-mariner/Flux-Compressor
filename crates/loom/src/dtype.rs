@@ -20,46 +20,72 @@ use arrow_schema::{DataType, TimeUnit};
 #[repr(u8)]
 pub enum FluxDType {
     // ── Unsigned integers ────────────────────────────────────────────────
-    #[serde(rename = "uint8")]  UInt8   = 0x00,
-    #[serde(rename = "uint16")] UInt16  = 0x01,
-    #[serde(rename = "uint32")] UInt32  = 0x02,
-    #[serde(rename = "uint64")] UInt64  = 0x03,
+    #[serde(rename = "uint8")]
+    UInt8 = 0x00,
+    #[serde(rename = "uint16")]
+    UInt16 = 0x01,
+    #[serde(rename = "uint32")]
+    UInt32 = 0x02,
+    #[serde(rename = "uint64")]
+    UInt64 = 0x03,
 
     // ── Signed integers ──────────────────────────────────────────────────
-    #[serde(rename = "int8")]  Int8  = 0x04,
-    #[serde(rename = "int16")] Int16 = 0x05,
-    #[serde(rename = "int32")] Int32 = 0x06,
-    #[serde(rename = "int64")] Int64 = 0x07,
+    #[serde(rename = "int8")]
+    Int8 = 0x04,
+    #[serde(rename = "int16")]
+    Int16 = 0x05,
+    #[serde(rename = "int32")]
+    Int32 = 0x06,
+    #[serde(rename = "int64")]
+    Int64 = 0x07,
 
     // ── Floating point ───────────────────────────────────────────────────
-    #[serde(rename = "float32")] Float32 = 0x08,
-    #[serde(rename = "float64")] Float64 = 0x09,
+    #[serde(rename = "float32")]
+    Float32 = 0x08,
+    #[serde(rename = "float64")]
+    Float64 = 0x09,
 
     // ── Boolean / Date / Time ────────────────────────────────────────────
-    #[serde(rename = "boolean")]          Boolean          = 0x0A,
-    #[serde(rename = "date32")]           Date32           = 0x0B,
-    #[serde(rename = "date64")]           Date64           = 0x0C,
-    #[serde(rename = "timestamp_second")] TimestampSecond  = 0x0D,
-    #[serde(rename = "timestamp_millis")] TimestampMillis  = 0x0E,
-    #[serde(rename = "timestamp_micros")] TimestampMicros  = 0x0F,
-    #[serde(rename = "timestamp_nanos")]  TimestampNanos   = 0x10,
+    #[serde(rename = "boolean")]
+    Boolean = 0x0A,
+    #[serde(rename = "date32")]
+    Date32 = 0x0B,
+    #[serde(rename = "date64")]
+    Date64 = 0x0C,
+    #[serde(rename = "timestamp_second")]
+    TimestampSecond = 0x0D,
+    #[serde(rename = "timestamp_millis")]
+    TimestampMillis = 0x0E,
+    #[serde(rename = "timestamp_micros")]
+    TimestampMicros = 0x0F,
+    #[serde(rename = "timestamp_nanos")]
+    TimestampNanos = 0x10,
 
     // ── Decimal ──────────────────────────────────────────────────────────
-    #[serde(rename = "decimal128")] Decimal128 = 0x11,
+    #[serde(rename = "decimal128")]
+    Decimal128 = 0x11,
 
     // ── Variable-length (Tier 2) ─────────────────────────────────────────
-    #[serde(rename = "utf8")]         Utf8        = 0x20,
-    #[serde(rename = "large_utf8")]   LargeUtf8   = 0x21,
-    #[serde(rename = "binary")]       Binary      = 0x22,
-    #[serde(rename = "large_binary")] LargeBinary = 0x23,
+    #[serde(rename = "utf8")]
+    Utf8 = 0x20,
+    #[serde(rename = "large_utf8")]
+    LargeUtf8 = 0x21,
+    #[serde(rename = "binary")]
+    Binary = 0x22,
+    #[serde(rename = "large_binary")]
+    LargeBinary = 0x23,
 
     // ── Internal: offset column for List/Map ─────────────────────────────
-    #[serde(rename = "offsets")] Offsets = 0x30,
+    #[serde(rename = "offsets")]
+    Offsets = 0x30,
 
     // ── Nested containers (Tier 3) ───────────────────────────────────────
-    #[serde(rename = "struct")] StructContainer = 0x40,
-    #[serde(rename = "list")]   ListContainer   = 0x41,
-    #[serde(rename = "map")]    MapContainer    = 0x42,
+    #[serde(rename = "struct")]
+    StructContainer = 0x40,
+    #[serde(rename = "list")]
+    ListContainer = 0x41,
+    #[serde(rename = "map")]
+    MapContainer = 0x42,
 }
 
 impl FluxDType {
@@ -68,31 +94,31 @@ impl FluxDType {
     /// Returns `None` for unsupported / unmapped types.
     pub fn from_arrow(dt: &DataType) -> Option<Self> {
         match dt {
-            DataType::UInt8   => Some(Self::UInt8),
-            DataType::UInt16  => Some(Self::UInt16),
-            DataType::UInt32  => Some(Self::UInt32),
-            DataType::UInt64  => Some(Self::UInt64),
-            DataType::Int8    => Some(Self::Int8),
-            DataType::Int16   => Some(Self::Int16),
-            DataType::Int32   => Some(Self::Int32),
-            DataType::Int64   => Some(Self::Int64),
+            DataType::UInt8 => Some(Self::UInt8),
+            DataType::UInt16 => Some(Self::UInt16),
+            DataType::UInt32 => Some(Self::UInt32),
+            DataType::UInt64 => Some(Self::UInt64),
+            DataType::Int8 => Some(Self::Int8),
+            DataType::Int16 => Some(Self::Int16),
+            DataType::Int32 => Some(Self::Int32),
+            DataType::Int64 => Some(Self::Int64),
             DataType::Float32 => Some(Self::Float32),
             DataType::Float64 => Some(Self::Float64),
             DataType::Boolean => Some(Self::Boolean),
-            DataType::Date32  => Some(Self::Date32),
-            DataType::Date64  => Some(Self::Date64),
-            DataType::Timestamp(TimeUnit::Second, _)      => Some(Self::TimestampSecond),
-            DataType::Timestamp(TimeUnit::Millisecond, _)  => Some(Self::TimestampMillis),
-            DataType::Timestamp(TimeUnit::Microsecond, _)  => Some(Self::TimestampMicros),
-            DataType::Timestamp(TimeUnit::Nanosecond, _)   => Some(Self::TimestampNanos),
+            DataType::Date32 => Some(Self::Date32),
+            DataType::Date64 => Some(Self::Date64),
+            DataType::Timestamp(TimeUnit::Second, _) => Some(Self::TimestampSecond),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => Some(Self::TimestampMillis),
+            DataType::Timestamp(TimeUnit::Microsecond, _) => Some(Self::TimestampMicros),
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => Some(Self::TimestampNanos),
             DataType::Decimal128(_, _) => Some(Self::Decimal128),
-            DataType::Utf8        => Some(Self::Utf8),
-            DataType::LargeUtf8   => Some(Self::LargeUtf8),
-            DataType::Binary      => Some(Self::Binary),
+            DataType::Utf8 => Some(Self::Utf8),
+            DataType::LargeUtf8 => Some(Self::LargeUtf8),
+            DataType::Binary => Some(Self::Binary),
             DataType::LargeBinary => Some(Self::LargeBinary),
-            DataType::Struct(_)   => Some(Self::StructContainer),
-            DataType::List(_)     => Some(Self::ListContainer),
-            DataType::Map(_, _)   => Some(Self::MapContainer),
+            DataType::Struct(_) => Some(Self::StructContainer),
+            DataType::List(_) => Some(Self::ListContainer),
+            DataType::Map(_, _) => Some(Self::MapContainer),
             _ => None,
         }
     }
@@ -104,35 +130,37 @@ impl FluxDType {
     /// reconstructed from the `ColumnDescriptor` tree when available.
     pub fn to_arrow(self) -> DataType {
         match self {
-            Self::UInt8   => DataType::UInt8,
-            Self::UInt16  => DataType::UInt16,
-            Self::UInt32  => DataType::UInt32,
-            Self::UInt64  => DataType::UInt64,
-            Self::Int8    => DataType::Int8,
-            Self::Int16   => DataType::Int16,
-            Self::Int32   => DataType::Int32,
-            Self::Int64   => DataType::Int64,
+            Self::UInt8 => DataType::UInt8,
+            Self::UInt16 => DataType::UInt16,
+            Self::UInt32 => DataType::UInt32,
+            Self::UInt64 => DataType::UInt64,
+            Self::Int8 => DataType::Int8,
+            Self::Int16 => DataType::Int16,
+            Self::Int32 => DataType::Int32,
+            Self::Int64 => DataType::Int64,
             Self::Float32 => DataType::Float32,
             Self::Float64 => DataType::Float64,
             Self::Boolean => DataType::Boolean,
-            Self::Date32  => DataType::Date32,
-            Self::Date64  => DataType::Date64,
+            Self::Date32 => DataType::Date32,
+            Self::Date64 => DataType::Date64,
             Self::TimestampSecond => DataType::Timestamp(TimeUnit::Second, None),
             Self::TimestampMillis => DataType::Timestamp(TimeUnit::Millisecond, None),
             Self::TimestampMicros => DataType::Timestamp(TimeUnit::Microsecond, None),
-            Self::TimestampNanos  => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            Self::TimestampNanos => DataType::Timestamp(TimeUnit::Nanosecond, None),
             Self::Decimal128 => DataType::Decimal128(38, 10),
-            Self::Utf8        => DataType::Utf8,
-            Self::LargeUtf8   => DataType::LargeUtf8,
-            Self::Binary      => DataType::Binary,
+            Self::Utf8 => DataType::Utf8,
+            Self::LargeUtf8 => DataType::LargeUtf8,
+            Self::Binary => DataType::Binary,
             Self::LargeBinary => DataType::LargeBinary,
             // Containers don't map to a single leaf DataType; callers must
             // use the ColumnDescriptor tree to reconstruct nested schemas.
-            Self::Offsets         => DataType::Int32,
+            Self::Offsets => DataType::Int32,
             Self::StructContainer => DataType::Struct(Default::default()),
-            Self::ListContainer   => DataType::List(std::sync::Arc::new(
-                arrow_schema::Field::new("item", DataType::Int64, true),
-            )),
+            Self::ListContainer => DataType::List(std::sync::Arc::new(arrow_schema::Field::new(
+                "item",
+                DataType::Int64,
+                true,
+            ))),
             Self::MapContainer => DataType::Map(
                 std::sync::Arc::new(arrow_schema::Field::new(
                     "entries",
@@ -257,16 +285,32 @@ mod tests {
     #[test]
     fn round_trip_all_tags() {
         let all = [
-            FluxDType::UInt8, FluxDType::UInt16, FluxDType::UInt32, FluxDType::UInt64,
-            FluxDType::Int8, FluxDType::Int16, FluxDType::Int32, FluxDType::Int64,
-            FluxDType::Float32, FluxDType::Float64,
-            FluxDType::Boolean, FluxDType::Date32, FluxDType::Date64,
-            FluxDType::TimestampSecond, FluxDType::TimestampMillis,
-            FluxDType::TimestampMicros, FluxDType::TimestampNanos,
+            FluxDType::UInt8,
+            FluxDType::UInt16,
+            FluxDType::UInt32,
+            FluxDType::UInt64,
+            FluxDType::Int8,
+            FluxDType::Int16,
+            FluxDType::Int32,
+            FluxDType::Int64,
+            FluxDType::Float32,
+            FluxDType::Float64,
+            FluxDType::Boolean,
+            FluxDType::Date32,
+            FluxDType::Date64,
+            FluxDType::TimestampSecond,
+            FluxDType::TimestampMillis,
+            FluxDType::TimestampMicros,
+            FluxDType::TimestampNanos,
             FluxDType::Decimal128,
-            FluxDType::Utf8, FluxDType::LargeUtf8, FluxDType::Binary, FluxDType::LargeBinary,
+            FluxDType::Utf8,
+            FluxDType::LargeUtf8,
+            FluxDType::Binary,
+            FluxDType::LargeBinary,
             FluxDType::Offsets,
-            FluxDType::StructContainer, FluxDType::ListContainer, FluxDType::MapContainer,
+            FluxDType::StructContainer,
+            FluxDType::ListContainer,
+            FluxDType::MapContainer,
         ];
         for dt in all {
             let tag = dt.as_u8();
@@ -277,9 +321,18 @@ mod tests {
 
     #[test]
     fn from_arrow_common_types() {
-        assert_eq!(FluxDType::from_arrow(&DataType::UInt64), Some(FluxDType::UInt64));
-        assert_eq!(FluxDType::from_arrow(&DataType::Float64), Some(FluxDType::Float64));
-        assert_eq!(FluxDType::from_arrow(&DataType::Boolean), Some(FluxDType::Boolean));
+        assert_eq!(
+            FluxDType::from_arrow(&DataType::UInt64),
+            Some(FluxDType::UInt64)
+        );
+        assert_eq!(
+            FluxDType::from_arrow(&DataType::Float64),
+            Some(FluxDType::Float64)
+        );
+        assert_eq!(
+            FluxDType::from_arrow(&DataType::Boolean),
+            Some(FluxDType::Boolean)
+        );
         assert_eq!(
             FluxDType::from_arrow(&DataType::Timestamp(TimeUnit::Microsecond, None)),
             Some(FluxDType::TimestampMicros),
@@ -291,12 +344,22 @@ mod tests {
     #[test]
     fn identity_promotion_allowed() {
         for t in [
-            FluxDType::Int8, FluxDType::Int16, FluxDType::Int32, FluxDType::Int64,
-            FluxDType::UInt8, FluxDType::UInt16, FluxDType::UInt32, FluxDType::UInt64,
-            FluxDType::Float32, FluxDType::Float64,
-            FluxDType::Utf8, FluxDType::LargeUtf8,
-            FluxDType::Binary, FluxDType::LargeBinary,
-            FluxDType::Decimal128, FluxDType::Boolean,
+            FluxDType::Int8,
+            FluxDType::Int16,
+            FluxDType::Int32,
+            FluxDType::Int64,
+            FluxDType::UInt8,
+            FluxDType::UInt16,
+            FluxDType::UInt32,
+            FluxDType::UInt64,
+            FluxDType::Float32,
+            FluxDType::Float64,
+            FluxDType::Utf8,
+            FluxDType::LargeUtf8,
+            FluxDType::Binary,
+            FluxDType::LargeBinary,
+            FluxDType::Decimal128,
+            FluxDType::Boolean,
         ] {
             assert!(t.can_promote_to(t), "identity should be allowed for {t:?}");
         }
@@ -305,10 +368,10 @@ mod tests {
     #[test]
     fn signed_widening_allowed_up_through_decimal128() {
         for (s, t) in [
-            (FluxDType::Int8,  FluxDType::Int16),
-            (FluxDType::Int8,  FluxDType::Int32),
-            (FluxDType::Int8,  FluxDType::Int64),
-            (FluxDType::Int8,  FluxDType::Decimal128),
+            (FluxDType::Int8, FluxDType::Int16),
+            (FluxDType::Int8, FluxDType::Int32),
+            (FluxDType::Int8, FluxDType::Int64),
+            (FluxDType::Int8, FluxDType::Decimal128),
             (FluxDType::Int16, FluxDType::Int32),
             (FluxDType::Int16, FluxDType::Int64),
             (FluxDType::Int16, FluxDType::Decimal128),
@@ -323,10 +386,10 @@ mod tests {
     #[test]
     fn unsigned_widening_allowed_up_through_decimal128() {
         for (s, t) in [
-            (FluxDType::UInt8,  FluxDType::UInt16),
-            (FluxDType::UInt8,  FluxDType::UInt32),
-            (FluxDType::UInt8,  FluxDType::UInt64),
-            (FluxDType::UInt8,  FluxDType::Decimal128),
+            (FluxDType::UInt8, FluxDType::UInt16),
+            (FluxDType::UInt8, FluxDType::UInt32),
+            (FluxDType::UInt8, FluxDType::UInt64),
+            (FluxDType::UInt8, FluxDType::Decimal128),
             (FluxDType::UInt16, FluxDType::UInt32),
             (FluxDType::UInt16, FluxDType::UInt64),
             (FluxDType::UInt16, FluxDType::Decimal128),
@@ -381,7 +444,15 @@ mod tests {
 
     #[test]
     fn cast_target_returns_none_on_rejected_pair() {
-        assert!(FluxDType::Int64.cast_target_arrow_dtype(FluxDType::Int32).is_none());
-        assert!(FluxDType::Float64.cast_target_arrow_dtype(FluxDType::Int64).is_none());
+        assert!(
+            FluxDType::Int64
+                .cast_target_arrow_dtype(FluxDType::Int32)
+                .is_none()
+        );
+        assert!(
+            FluxDType::Float64
+                .cast_target_arrow_dtype(FluxDType::Int64)
+                .is_none()
+        );
     }
 }

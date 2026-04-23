@@ -145,17 +145,15 @@
 #![allow(non_snake_case)]
 
 use jni::JNIEnv;
-use jni::objects::{
-    JByteArray, JByteBuffer, JClass, JLongArray, JObject, JObjectArray, JString,
-};
-use jni::sys::{jbyteArray, jlong, jlongArray, jobjectArray, jint};
+use jni::objects::{JByteArray, JByteBuffer, JClass, JLongArray, JObject, JObjectArray, JString};
+use jni::sys::{jbyteArray, jint, jlong, jlongArray, jobjectArray};
 
 use loom::{
+    CompressionProfile,
     compressors::flux_writer::FluxWriter,
     decompressors::flux_reader::FluxReader,
     traits::{LoomCompressor, LoomDecompressor, Predicate},
     txn::FluxTable,
-    CompressionProfile,
 };
 
 mod u128_bridge;
@@ -181,15 +179,13 @@ pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_compress(
 ) -> jbyteArray {
     let result = compress_direct_buffer(&mut env, &data, value_count as usize);
     match result {
-        Ok(bytes) => {
-            match env.byte_array_from_slice(&bytes) {
-                Ok(arr) => arr.into_raw(),
-                Err(e) => {
-                    let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
-                    std::ptr::null_mut()
-                }
+        Ok(bytes) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(e) => {
+                let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
+                std::ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
             std::ptr::null_mut()
@@ -208,9 +204,9 @@ fn compress_direct_buffer(
 
     let needed = value_count * 8;
     if capacity < needed {
-        return Err(format!(
-            "DirectByteBuffer too small: need {needed} bytes, have {capacity}"
-        ).into());
+        return Err(
+            format!("DirectByteBuffer too small: need {needed} bytes, have {capacity}").into(),
+        );
     }
 
     // SAFETY: `ptr` is valid for `capacity` bytes as guaranteed by the JVM.
@@ -502,10 +498,7 @@ pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableOpen(
     }
 }
 
-fn table_open_inner(
-    env: &mut JNIEnv,
-    path: &JString,
-) -> Result<jlong, Box<dyn std::error::Error>> {
+fn table_open_inner(env: &mut JNIEnv, path: &JString) -> Result<jlong, Box<dyn std::error::Error>> {
     let path_str: String = env.get_string(path)?.into();
     let table = FluxTable::open(&path_str)?;
     Ok(table_registry::insert(table))
@@ -688,7 +681,8 @@ pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableCurren
 ) -> jlong {
     let result: Option<Result<jlong, loom::error::FluxError>> =
         table_registry::with(handle, |table: &FluxTable| {
-            table.next_version()
+            table
+                .next_version()
                 .map(|v| if v == 0 { -1 } else { (v - 1) as jlong })
         });
     match result {
@@ -714,14 +708,15 @@ pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableCurren
 /// Parse a profile name string into a [`CompressionProfile`].
 fn parse_profile(s: &str) -> Result<CompressionProfile, Box<dyn std::error::Error>> {
     match s.to_ascii_lowercase().as_str() {
-        "speed"    | ""       => Ok(CompressionProfile::Speed),
-        "balanced"             => Ok(CompressionProfile::Balanced),
-        "archive"              => Ok(CompressionProfile::Archive),
-        "brotli"               => Ok(CompressionProfile::Brotli),
+        "speed" | "" => Ok(CompressionProfile::Speed),
+        "balanced" => Ok(CompressionProfile::Balanced),
+        "archive" => Ok(CompressionProfile::Archive),
+        "brotli" => Ok(CompressionProfile::Brotli),
         other => Err(format!(
             "unknown compression profile '{other}'; \
              expected one of: speed, balanced, archive, brotli"
-        ).into()),
+        )
+        .into()),
     }
 }
 
@@ -739,18 +734,21 @@ fn invalid_handle_err(handle: jlong) -> Box<dyn std::error::Error> {
 mod phase_g_tests {
     use std::sync::Arc;
 
+    use arrow_array::RecordBatch;
     use arrow_array::{Int32Array, StringArray, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
-    use arrow_array::RecordBatch;
     use tempfile::TempDir;
 
     use loom::{
+        CompressionProfile,
         compressors::flux_writer::FluxWriter,
         decompressors::flux_reader::FluxReader,
-        traits::{LoomCompressor, LoomDecompressor},
-        txn::{schema::{SchemaField, TableSchema}, FluxTable},
         dtype::FluxDType,
-        CompressionProfile,
+        traits::{LoomCompressor, LoomDecompressor},
+        txn::{
+            FluxTable,
+            schema::{SchemaField, TableSchema},
+        },
     };
 
     use crate::ipc_bridge::{batch_from_ipc, batch_to_ipc, batches_to_ipc};
@@ -758,15 +756,17 @@ mod phase_g_tests {
 
     fn make_batch(rows: usize) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("id",    DataType::UInt64, false),
-            Field::new("score", DataType::Int32,  false),
-            Field::new("label", DataType::Utf8,   true),
+            Field::new("id", DataType::UInt64, false),
+            Field::new("score", DataType::Int32, false),
+            Field::new("label", DataType::Utf8, true),
         ]));
         RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(UInt64Array::from_iter_values(0..rows as u64)),
-                Arc::new(Int32Array::from_iter_values((0..rows as i32).map(|x| x * 10))),
+                Arc::new(Int32Array::from_iter_values(
+                    (0..rows as i32).map(|x| x * 10),
+                )),
                 Arc::new(StringArray::from_iter_values(
                     (0..rows).map(|i| format!("row_{i}")),
                 )),
@@ -779,8 +779,8 @@ mod phase_g_tests {
 
     #[test]
     fn compress_decompress_table_round_trip() {
-        let batch   = make_batch(100);
-        let ipc_in  = batch_to_ipc(&batch).unwrap();
+        let batch = make_batch(100);
+        let ipc_in = batch_to_ipc(&batch).unwrap();
 
         // Simulate compressTable JNI call (sans JNI machinery).
         let flux = {
@@ -792,23 +792,27 @@ mod phase_g_tests {
 
         // Simulate decompressTable JNI call.
         let ipc_out = {
-            let reader  = FluxReader::default();
+            let reader = FluxReader::default();
             let decoded = reader.decompress_all(&flux).unwrap();
             batch_to_ipc(&decoded).unwrap()
         };
 
         let result = batch_from_ipc(&ipc_out).unwrap();
-        assert_eq!(result.num_rows(),    batch.num_rows());
+        assert_eq!(result.num_rows(), batch.num_rows());
         assert_eq!(result.num_columns(), batch.num_columns());
 
-        let ids = result.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+        let ids = result
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
         assert_eq!(ids.value(0), 0);
         assert_eq!(ids.value(99), 99);
     }
 
     #[test]
     fn compress_table_brotli_profile() {
-        let batch  = make_batch(50);
+        let batch = make_batch(50);
         let ipc_in = batch_to_ipc(&batch).unwrap();
         let decoded_batch = batch_from_ipc(&ipc_in).unwrap();
         let flux = FluxWriter::with_profile(CompressionProfile::Brotli)
@@ -822,7 +826,7 @@ mod phase_g_tests {
 
     #[test]
     fn table_open_append_scan_close_round_trip() {
-        let dir   = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let table = FluxTable::open(dir.path().join("test.fluxtable")).unwrap();
         let handle = table_registry::insert(table);
 
@@ -837,11 +841,9 @@ mod phase_g_tests {
 
         // Scan should return 64 rows (via the scan_all_files fallback path
         // since no schema has been declared on this table).
-        let batches = table_registry::with(handle, |t| {
-            crate::scan_all_files(t)
-        })
-        .unwrap()
-        .unwrap();
+        let batches = table_registry::with(handle, |t| crate::scan_all_files(t))
+            .unwrap()
+            .unwrap();
         let ipc = batches_to_ipc(&batches).unwrap();
         let result = batch_from_ipc(&ipc).unwrap();
         assert_eq!(result.num_rows(), 64);
@@ -854,8 +856,8 @@ mod phase_g_tests {
 
     #[test]
     fn table_evolve_then_scan_projects_correctly() {
-        let dir    = TempDir::new().unwrap();
-        let table  = FluxTable::open(dir.path().join("evo.fluxtable")).unwrap();
+        let dir = TempDir::new().unwrap();
+        let table = FluxTable::open(dir.path().join("evo.fluxtable")).unwrap();
         let handle = table_registry::insert(table);
 
         // v0 schema: {id: u64}.
@@ -864,32 +866,38 @@ mod phase_g_tests {
         ]);
         let schema_json = serde_json::to_string(&schema_v0).unwrap();
         let v0: loom::txn::schema::TableSchema = serde_json::from_str(&schema_json).unwrap();
-        let _ = table_registry::with(handle, |t| t.evolve_schema(v0)).unwrap().unwrap();
+        let _ = table_registry::with(handle, |t| t.evolve_schema(v0))
+            .unwrap()
+            .unwrap();
 
         // Append a batch.
         let batch_v0 = {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::UInt64, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(UInt64Array::from(vec![10u64, 20, 30]))],
-            ).unwrap()
+            )
+            .unwrap()
         };
         let flux_v0 = FluxWriter::new().compress(&batch_v0).unwrap();
-        table_registry::with(handle, |t| t.append(&flux_v0)).unwrap().unwrap();
+        table_registry::with(handle, |t| t.append(&flux_v0))
+            .unwrap()
+            .unwrap();
 
         // Evolve to {id, label}.
         let schema_v1 = TableSchema::new(vec![
-            SchemaField::new(1, "id",    FluxDType::UInt64).with_nullable(false),
+            SchemaField::new(1, "id", FluxDType::UInt64).with_nullable(false),
             SchemaField::new(2, "label", FluxDType::Utf8),
         ]);
-        let _ = table_registry::with(handle, |t| t.evolve_schema(schema_v1)).unwrap().unwrap();
+        let _ = table_registry::with(handle, |t| t.evolve_schema(schema_v1))
+            .unwrap()
+            .unwrap();
 
         // Scan — old file should be null-filled for `label`.
         let batches: Vec<RecordBatch> = table_registry::with(handle, |t| {
             t.scan().unwrap().map(|r| r.unwrap()).collect::<Vec<_>>()
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_columns(), 2);
         assert_eq!(batches[0].column(1).null_count(), 3); // null-filled

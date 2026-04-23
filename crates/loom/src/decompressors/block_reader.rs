@@ -7,20 +7,15 @@
 //! to the correct decompressor.  Returns the decoded `u128` values and the
 //! number of bytes consumed from the input slice.
 
-use std::io::Read;
 use crate::{
-    error::{FluxError, FluxResult},
     SecondaryCodec,
     compressors::{
-        bit_slab_compressor,
-        rle_compressor,
-        delta_compressor,
-        dict_compressor,
-        lz4_compressor,
-        string_compressor,
-        alp_compressor,
+        alp_compressor, bit_slab_compressor, delta_compressor, dict_compressor, lz4_compressor,
+        rle_compressor, string_compressor,
     },
+    error::{FluxError, FluxResult},
 };
+use std::io::Read;
 
 /// Decompress a single block starting at `data[0]`.
 ///
@@ -95,15 +90,15 @@ pub fn decompress_block(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
 fn decompress_inner(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     let tag = data[0];
     match tag {
-        rle_compressor::TAG        => rle_compressor::decompress(data),
-        delta_compressor::TAG      => delta_compressor::decompress(data),
-        dict_compressor::TAG       => dict_compressor::decompress(data),
-        bit_slab_compressor::TAG   => bit_slab_compressor::decompress(data),
-        lz4_compressor::TAG        => lz4_compressor::decompress(data),
-        alp_compressor::TAG        => alp_compressor::decompress(data),
+        rle_compressor::TAG => rle_compressor::decompress(data),
+        delta_compressor::TAG => delta_compressor::decompress(data),
+        dict_compressor::TAG => dict_compressor::decompress(data),
+        bit_slab_compressor::TAG => bit_slab_compressor::decompress(data),
+        lz4_compressor::TAG => lz4_compressor::decompress(data),
+        alp_compressor::TAG => alp_compressor::decompress(data),
         // String blocks are handled separately (they return Vec<Vec<u8>>,
         // not Vec<u128>). This tag should not reach decompress_inner.
-        string_compressor::TAG     => Err(FluxError::InvalidFile(
+        string_compressor::TAG => Err(FluxError::InvalidFile(
             "string block (TAG 0x06) must be decompressed via string_compressor::decompress".into(),
         )),
         unknown => Err(FluxError::InvalidFile(format!(

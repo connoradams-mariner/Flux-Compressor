@@ -35,8 +35,8 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
 
-use crate::error::{FluxError, FluxResult};
 use crate::compressors::{bit_slab_compressor, delta_compressor};
+use crate::error::{FluxError, FluxResult};
 
 /// Block tag for ALP.
 pub const TAG: u8 = 0x09;
@@ -65,7 +65,11 @@ fn try_compress_inner(values: &[f64], is_f32: bool) -> FluxResult<Option<Vec<u8>
     if values.len() < 32 {
         return Ok(None);
     }
-    let max_exp = if is_f32 { ALP_MAX_EXP_F32 } else { ALP_MAX_EXP_F64 };
+    let max_exp = if is_f32 {
+        ALP_MAX_EXP_F32
+    } else {
+        ALP_MAX_EXP_F64
+    };
     let exp = match find_best_exp(values, max_exp) {
         Some(e) => e,
         None => return Ok(None),
@@ -106,11 +110,12 @@ fn try_compress_inner(values: &[f64], is_f32: bool) -> FluxResult<Option<Vec<u8>
     // Compress mantissas via the normal Loom pipeline. We pick BitSlab vs
     // DeltaDelta based on a quick classifier probe.
     let mantissas_u128: Vec<u128> = mantissas.iter().map(|&m| m as u64 as u128).collect();
-    use crate::loom_classifier::{classify, LoomStrategy};
+    use crate::loom_classifier::{LoomStrategy, classify};
     let cls = classify(&mantissas_u128);
     let inner = match cls.strategy {
-        LoomStrategy::DeltaDelta if mantissas_u128.len() >= 2 =>
-            delta_compressor::compress(&mantissas_u128)?,
+        LoomStrategy::DeltaDelta if mantissas_u128.len() >= 2 => {
+            delta_compressor::compress(&mantissas_u128)?
+        }
         _ => bit_slab_compressor::compress(&mantissas_u128)?,
     };
 
@@ -201,7 +206,9 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     let (mantissas_u128, _) = decompress_block(inner)?;
     if mantissas_u128.len() != count {
         return Err(FluxError::InvalidFile(format!(
-            "ALP mantissa count {} != header {}", mantissas_u128.len(), count,
+            "ALP mantissa count {} != header {}",
+            mantissas_u128.len(),
+            count,
         )));
     }
 
@@ -219,7 +226,11 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     // Patch outliers with their verbatim bits.
     for (i, b) in outliers {
         if i < out.len() {
-            out[i] = if is_f32 { (b as u32) as u64 as u128 } else { b as u128 };
+            out[i] = if is_f32 {
+                (b as u32) as u64 as u128
+            } else {
+                b as u128
+            };
         }
     }
 
@@ -236,19 +247,20 @@ mod tests {
         // construct each value as cents/100 so the f64 bit pattern matches
         // the ALP reconstruction formula exactly (same as parsing "X.YY"
         // from CSV).
-        let values: Vec<f64> = (0..2000)
-            .map(|i| ((199 + i) as f64) / 100.0)
-            .collect();
+        let values: Vec<f64> = (0..2000).map(|i| ((199 + i) as f64) / 100.0).collect();
         let block = try_compress_f64(&values).unwrap().expect("ALP should fire");
         assert_eq!(block[0], TAG);
         let raw_size = values.len() * 8;
-        assert!(block.len() < raw_size / 2,
-            "expected >2x shrink, got {} → {}", raw_size, block.len());
+        assert!(
+            block.len() < raw_size / 2,
+            "expected >2x shrink, got {} → {}",
+            raw_size,
+            block.len()
+        );
         let (decoded, _) = decompress(&block).unwrap();
         for (i, &orig) in values.iter().enumerate() {
             let got = f64::from_bits(decoded[i] as u64);
-            assert_eq!(got.to_bits(), orig.to_bits(),
-                "row {i}: {orig} vs {got}");
+            assert_eq!(got.to_bits(), orig.to_bits(), "row {i}: {orig} vs {got}");
         }
     }
 
@@ -263,8 +275,7 @@ mod tests {
         let (decoded, _) = decompress(&block).unwrap();
         for (i, &orig) in values.iter().enumerate() {
             let got = f64::from_bits(decoded[i] as u64);
-            assert_eq!(got.to_bits(), orig.to_bits(),
-                "row {i}: {orig} vs {got}");
+            assert_eq!(got.to_bits(), orig.to_bits(), "row {i}: {orig} vs {got}");
         }
     }
 
@@ -272,10 +283,16 @@ mod tests {
     fn alp_round_trip_integer_floats() {
         // Counts stored as Float64 — extremely common in CSV.
         let values: Vec<f64> = (0..3000).map(|i| i as f64).collect();
-        let block = try_compress_f64(&values).unwrap().expect("ALP should fire on integer floats");
+        let block = try_compress_f64(&values)
+            .unwrap()
+            .expect("ALP should fire on integer floats");
         let raw_size = values.len() * 8;
-        assert!(block.len() < raw_size / 4,
-            "expected >4x shrink, got {} → {}", raw_size, block.len());
+        assert!(
+            block.len() < raw_size / 4,
+            "expected >4x shrink, got {} → {}",
+            raw_size,
+            block.len()
+        );
         let (decoded, _) = decompress(&block).unwrap();
         for (i, &orig) in values.iter().enumerate() {
             assert_eq!(f64::from_bits(decoded[i] as u64).to_bits(), orig.to_bits());
@@ -286,10 +303,14 @@ mod tests {
     fn alp_falls_back_on_random_doubles() {
         // Truly random-bit doubles aren't decimal-representable.
         let mut s: u64 = 0xDEADBEEF;
-        let values: Vec<f64> = (0..500).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            f64::from_bits(s)
-        }).collect();
+        let values: Vec<f64> = (0..500)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                f64::from_bits(s)
+            })
+            .collect();
         // Filter NaNs that might break round-trip.
         let values: Vec<f64> = values.into_iter().filter(|v| v.is_finite()).collect();
         let block = try_compress_f64(&values).unwrap();

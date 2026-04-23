@@ -104,9 +104,9 @@ mod tests {
 
     fn three_col_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("id",    DataType::UInt64, false),
-            Field::new("score", DataType::Int32,  false),
-            Field::new("label", DataType::Utf8,   true),
+            Field::new("id", DataType::UInt64, false),
+            Field::new("score", DataType::Int32, false),
+            Field::new("label", DataType::Utf8, true),
         ]));
         RecordBatch::try_new(
             schema,
@@ -121,11 +121,11 @@ mod tests {
 
     #[test]
     fn round_trip_single_batch() {
-        let batch   = three_col_batch();
+        let batch = three_col_batch();
         let encoded = batch_to_ipc(&batch).unwrap();
         let decoded = batch_from_ipc(&encoded).unwrap();
 
-        assert_eq!(decoded.num_rows(),    batch.num_rows());
+        assert_eq!(decoded.num_rows(), batch.num_rows());
         assert_eq!(decoded.num_columns(), batch.num_columns());
 
         // Check every column name round-trips.
@@ -134,7 +134,8 @@ mod tests {
         }
 
         // Spot-check the UInt64 column.
-        let ids = decoded.column(0)
+        let ids = decoded
+            .column(0)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
@@ -161,8 +162,8 @@ mod tests {
 
     #[test]
     fn single_empty_batch_round_trips() {
-        let batch   = three_col_batch();
-        let empty   = RecordBatch::new_empty(batch.schema());
+        let batch = three_col_batch();
+        let empty = RecordBatch::new_empty(batch.schema());
         let encoded = batch_to_ipc(&empty).unwrap();
         let decoded = batch_from_ipc(&encoded).unwrap();
         assert_eq!(decoded.num_rows(), 0);

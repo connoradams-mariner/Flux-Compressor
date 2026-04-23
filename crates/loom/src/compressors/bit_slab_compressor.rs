@@ -19,8 +19,8 @@ use std::io::{Cursor, Write};
 
 use crate::{
     error::{FluxError, FluxResult},
-    outlier_map::{encode_with_outlier_map, decode_with_outlier_map},
     loom_classifier::LoomStrategy,
+    outlier_map::{decode_with_outlier_map, encode_with_outlier_map},
 };
 
 /// Strategy byte tag for BitSlab blocks.
@@ -83,11 +83,14 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     let slab_bytes = &data[slab_start..slab_end];
     let outlier_data = &data[slab_end..];
 
-    let values = decode_with_outlier_map(slab_bytes, outlier_data, for_val, slab_width, value_count)?;
+    let values =
+        decode_with_outlier_map(slab_bytes, outlier_data, for_val, slab_width, value_count)?;
 
     // Compute how many outlier bytes were consumed.
     let om_count = u32::from_le_bytes(
-        outlier_data[..4].try_into().map_err(|_| FluxError::InvalidFile("om header".into()))?,
+        outlier_data[..4]
+            .try_into()
+            .map_err(|_| FluxError::InvalidFile("om header".into()))?,
     ) as usize;
     let om_bytes_consumed = 4 + om_count * 16;
     let total_consumed = slab_end + om_bytes_consumed;

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use loom::traits::Predicate;
 
@@ -32,42 +32,46 @@ fn bench_eval_on_batch(c: &mut Criterion) {
         g.throughput(Throughput::Elements(rows as u64));
 
         // 1. Simple `>` — fastest case, single-column single-op.
-        g.bench_with_input(
-            BenchmarkId::new("gt", rows),
-            &batch,
-            |b, batch| {
-                let p = Predicate::GreaterThan { column: "x".into(), value: (rows as i128) / 2 };
-                b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("gt", rows), &batch, |b, batch| {
+            let p = Predicate::GreaterThan {
+                column: "x".into(),
+                value: (rows as i128) / 2,
+            };
+            b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
+        });
 
         // 2. `BETWEEN` — exercises AND under the hood.
-        g.bench_with_input(
-            BenchmarkId::new("between", rows),
-            &batch,
-            |b, batch| {
-                let lo = (rows as i128) / 4;
-                let hi = (rows as i128) * 3 / 4;
-                let p = Predicate::Between { column: "x".into(), lo, hi };
-                b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("between", rows), &batch, |b, batch| {
+            let lo = (rows as i128) / 4;
+            let hi = (rows as i128) * 3 / 4;
+            let p = Predicate::Between {
+                column: "x".into(),
+                lo,
+                hi,
+            };
+            b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
+        });
 
         // 3. Nested AND / OR — worst case for the recursive walker.
-        g.bench_with_input(
-            BenchmarkId::new("and_or_deep", rows),
-            &batch,
-            |b, batch| {
-                let gt = Predicate::GreaterThan { column: "x".into(), value: 100 };
-                let lt = Predicate::LessThan    { column: "x".into(), value: 10_000_000 };
-                let eq = Predicate::Equal       { column: "x".into(), value: 42 };
-                let p = Predicate::Or(
-                    Box::new(Predicate::And(Box::new(gt), Box::new(lt))),
-                    Box::new(eq),
-                );
-                b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
-            },
-        );
+        g.bench_with_input(BenchmarkId::new("and_or_deep", rows), &batch, |b, batch| {
+            let gt = Predicate::GreaterThan {
+                column: "x".into(),
+                value: 100,
+            };
+            let lt = Predicate::LessThan {
+                column: "x".into(),
+                value: 10_000_000,
+            };
+            let eq = Predicate::Equal {
+                column: "x".into(),
+                value: 42,
+            };
+            let p = Predicate::Or(
+                Box::new(Predicate::And(Box::new(gt), Box::new(lt))),
+                Box::new(eq),
+            );
+            b.iter(|| black_box(&p).eval_on_batch(black_box(batch)).unwrap())
+        });
     }
 
     g.finish();

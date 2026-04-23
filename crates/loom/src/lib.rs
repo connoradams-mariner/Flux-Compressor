@@ -61,28 +61,28 @@
 
 #![warn(missing_docs)]
 
+pub mod atlas;
 pub mod bit_io;
-pub mod outlier_map;
-pub mod loom_classifier;
 pub mod compressors;
 pub mod decompressors;
-pub mod atlas;
-pub mod simd;
-pub mod traits;
-pub mod error;
-pub mod segmenter;
-pub mod txn;
 pub mod dtype;
 pub mod dtype_router;
-pub mod null_bitmap;
+pub mod error;
+pub mod loom_classifier;
 pub mod null_aware;
+pub mod null_bitmap;
+pub mod outlier_map;
+pub mod segmenter;
+pub mod simd;
 pub mod string_zero_alloc;
+pub mod traits;
+pub mod txn;
 
-pub use traits::{LoomCompressor, LoomDecompressor, Predicate};
+pub use dtype::FluxDType;
+pub use dtype_router::{NativeWidth, RouteDecision};
 pub use error::FluxError;
 pub use loom_classifier::{LoomStrategy, classify};
-pub use dtype::FluxDType;
-pub use dtype_router::{RouteDecision, NativeWidth};
+pub use traits::{LoomCompressor, LoomDecompressor, Predicate};
 
 /// Format v2 magic bytes written at the end of every `.flux` file.
 /// "FLX2" in ASCII — v1 readers will reject v2 files cleanly.
@@ -122,11 +122,11 @@ pub enum CompressionProfile {
 #[repr(u8)]
 pub enum SecondaryCodec {
     /// No secondary compression.
-    None   = 0,
+    None = 0,
     /// LZ4 secondary compression.
-    Lz4    = 1,
+    Lz4 = 1,
     /// Zstd secondary compression.
-    Zstd   = 2,
+    Zstd = 2,
     /// Brotli secondary compression (best ratio on text/string data).
     Brotli = 3,
 }
@@ -148,10 +148,10 @@ impl CompressionProfile {
     /// Which secondary codec does this profile use?
     pub fn secondary_codec(self) -> SecondaryCodec {
         match self {
-            Self::Speed    => SecondaryCodec::None,
+            Self::Speed => SecondaryCodec::None,
             Self::Balanced => SecondaryCodec::Lz4,
-            Self::Archive  => SecondaryCodec::Zstd,
-            Self::Brotli   => SecondaryCodec::Brotli,
+            Self::Archive => SecondaryCodec::Zstd,
+            Self::Brotli => SecondaryCodec::Brotli,
         }
     }
 }

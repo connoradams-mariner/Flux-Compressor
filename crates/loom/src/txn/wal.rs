@@ -121,7 +121,8 @@ impl WalLog {
 
     /// Path of the checkpoint file for `version`.
     pub fn checkpoint_path(&self, version: u64) -> PathBuf {
-        self.log_dir.join(format!("_checkpoint-{:08}.json", version))
+        self.log_dir
+            .join(format!("_checkpoint-{:08}.json", version))
     }
 
     /// Does the WAL file exist?
@@ -132,9 +133,9 @@ impl WalLog {
     /// Append a [`LogEntry`] to the WAL. Returns the byte offset of
     /// the new frame (caller may stash this in a checkpoint record).
     pub fn append(&self, entry: &LogEntry) -> FluxResult<u64> {
-        let payload = entry.to_json().map_err(|e| {
-            FluxError::Internal(format!("wal append serialize: {e}"))
-        })?;
+        let payload = entry
+            .to_json()
+            .map_err(|e| FluxError::Internal(format!("wal append serialize: {e}")))?;
         let payload_bytes = payload.as_bytes();
 
         let mut file = OpenOptions::new()
@@ -191,9 +192,8 @@ impl WalLog {
                 // point is trusted.
                 break;
             }
-            let entry = LogEntry::from_json(&payload).map_err(|e| {
-                FluxError::InvalidFile(format!("wal record deserialize: {e}"))
-            })?;
+            let entry = LogEntry::from_json(&payload)
+                .map_err(|e| FluxError::InvalidFile(format!("wal record deserialize: {e}")))?;
             out.push(WalEntry { entry, offset });
             offset += 4 + len as u64 + 4;
         }
@@ -204,7 +204,11 @@ impl WalLog {
     /// the given `version`. The caller is responsible for providing a
     /// serde-compatible snapshot (we accept an opaque JSON value to
     /// avoid coupling `wal.rs` to `Snapshot`'s exact shape).
-    pub fn write_checkpoint(&self, version: u64, snapshot_json: &serde_json::Value) -> FluxResult<()> {
+    pub fn write_checkpoint(
+        &self,
+        version: u64,
+        snapshot_json: &serde_json::Value,
+    ) -> FluxResult<()> {
         let path = self.checkpoint_path(version);
         let s = serde_json::to_string_pretty(snapshot_json)
             .map_err(|e| FluxError::Internal(format!("checkpoint serialize: {e}")))?;
@@ -240,9 +244,8 @@ impl WalLog {
     pub fn read_checkpoint(&self, version: u64) -> FluxResult<serde_json::Value> {
         let path = self.checkpoint_path(version);
         let bytes = std::fs::read(&path).map_err(FluxError::Io)?;
-        serde_json::from_slice(&bytes).map_err(|e| {
-            FluxError::InvalidFile(format!("checkpoint deserialize: {e}"))
-        })
+        serde_json::from_slice(&bytes)
+            .map_err(|e| FluxError::InvalidFile(format!("checkpoint deserialize: {e}")))
     }
 }
 
@@ -260,7 +263,11 @@ mod tests {
         LogEntry {
             version,
             timestamp_ms: 1_700_000_000_000 + version,
-            operation: if version == 0 { Operation::Create } else { Operation::Append },
+            operation: if version == 0 {
+                Operation::Create
+            } else {
+                Operation::Append
+            },
             data_files_added: vec![format!("data/part-{version:04}.flux")],
             data_files_removed: vec![],
             file_manifests: vec![],

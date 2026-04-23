@@ -139,7 +139,10 @@ pub fn build_file_plan(
             file_physical_columns,
             file_row_count,
         )?;
-        if let ColumnPlan::Decode { ref physical_name, .. } = plan {
+        if let ColumnPlan::Decode {
+            ref physical_name, ..
+        } = plan
+        {
             if !physical.iter().any(|c| c == physical_name) {
                 physical.push(physical_name.clone());
             }
@@ -171,8 +174,7 @@ fn plan_for_field(
                 return Err(FluxError::SchemaEvolution(format!(
                     "field_id {} ('{}'): dtype change {:?} → {:?} is not a \
                      permitted promotion",
-                    target_field.field_id, target_field.name,
-                    fs_field.dtype, target_field.dtype,
+                    target_field.field_id, target_field.name, fs_field.dtype, target_field.dtype,
                 )));
             }
             // Sanity-check the physical name is actually in the footer
@@ -204,7 +206,10 @@ fn plan_for_field(
     // physical footer. We have no way to know the file's dtype here,
     // so we assume identity; type promotion requires a stamped file
     // schema to be well-defined.
-    if file_physical_columns.iter().any(|c| c == &target_field.name) {
+    if file_physical_columns
+        .iter()
+        .any(|c| c == &target_field.name)
+    {
         return Ok(ColumnPlan::Decode {
             physical_name: target_field.name.clone(),
             target_name: target_field.name.clone(),
@@ -253,14 +258,8 @@ mod tests {
 
     #[test]
     fn decode_when_field_matches_by_id() {
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
-        let target = schema(
-            1,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
+        let target = schema(1, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let plan = build_file_plan(&target, Some(&file_schema), &["id".into()], 100).unwrap();
         assert_eq!(plan.columns.len(), 1);
         match &plan.columns[0] {
@@ -283,17 +282,15 @@ mod tests {
 
     #[test]
     fn rename_uses_file_physical_name_and_target_display_name() {
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(2, "region", FluxDType::Utf8)],
-        );
-        let target = schema(
-            1,
-            vec![SchemaField::new(2, "region_code", FluxDType::Utf8)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(2, "region", FluxDType::Utf8)]);
+        let target = schema(1, vec![SchemaField::new(2, "region_code", FluxDType::Utf8)]);
         let plan = build_file_plan(&target, Some(&file_schema), &["region".into()], 10).unwrap();
         match &plan.columns[0] {
-            ColumnPlan::Decode { physical_name, target_name, .. } => {
+            ColumnPlan::Decode {
+                physical_name,
+                target_name,
+                ..
+            } => {
                 assert_eq!(physical_name, "region");
                 assert_eq!(target_name, "region_code");
             }
@@ -303,10 +300,7 @@ mod tests {
 
     #[test]
     fn added_nullable_field_fills_null() {
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let target = schema(
             1,
             vec![
@@ -317,7 +311,12 @@ mod tests {
         let plan = build_file_plan(&target, Some(&file_schema), &["id".into()], 42).unwrap();
         assert_eq!(plan.columns.len(), 2);
         match &plan.columns[1] {
-            ColumnPlan::Fill { target_name, default, row_count, .. } => {
+            ColumnPlan::Fill {
+                target_name,
+                default,
+                row_count,
+                ..
+            } => {
                 assert_eq!(target_name, "name");
                 assert!(default.is_none());
                 assert_eq!(*row_count, 42);
@@ -328,10 +327,7 @@ mod tests {
 
     #[test]
     fn added_field_with_default_fills_literal() {
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let target = schema(
             1,
             vec![
@@ -342,7 +338,10 @@ mod tests {
         );
         let plan = build_file_plan(&target, Some(&file_schema), &["id".into()], 7).unwrap();
         match &plan.columns[1] {
-            ColumnPlan::Fill { default: Some(DefaultValue::String(s)), .. } => {
+            ColumnPlan::Fill {
+                default: Some(DefaultValue::String(s)),
+                ..
+            } => {
                 assert_eq!(s, "unknown");
             }
             other => panic!("expected Fill with String default, got {other:?}"),
@@ -358,10 +357,7 @@ mod tests {
                 SchemaField::new(2, "dropped", FluxDType::Utf8),
             ],
         );
-        let target = schema(
-            1,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
+        let target = schema(1, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let plan = build_file_plan(
             &target,
             Some(&file_schema),
@@ -390,10 +386,7 @@ mod tests {
 
     #[test]
     fn field_missing_error_on_required_no_default() {
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "id", FluxDType::UInt64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let target = schema(
             1,
             vec![
@@ -410,14 +403,8 @@ mod tests {
     fn permitted_promotion_carries_source_dtype() {
         // Phase C: widening Int32 → Int64 is allowed; the plan must
         // expose the source dtype so the reader knows to cast.
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "v", FluxDType::Int32)],
-        );
-        let target = schema(
-            1,
-            vec![SchemaField::new(1, "v", FluxDType::Int64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "v", FluxDType::Int32)]);
+        let target = schema(1, vec![SchemaField::new(1, "v", FluxDType::Int64)]);
         let plan = build_file_plan(&target, Some(&file_schema), &["v".into()], 4).unwrap();
         match &plan.columns[0] {
             ColumnPlan::Decode {
@@ -435,10 +422,7 @@ mod tests {
     #[test]
     fn rejected_dtype_change_errors() {
         // Narrowing and cross-family changes stay rejected in Phase C.
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(1, "v", FluxDType::Int64)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(1, "v", FluxDType::Int64)]);
         let target = schema(
             1,
             vec![SchemaField::new(1, "v", FluxDType::Int32)], // narrowing
@@ -449,15 +433,9 @@ mod tests {
 
     #[test]
     fn pure_fill_plan_is_detected() {
-        let target = schema(
-            0,
-            vec![SchemaField::new(1, "new_col", FluxDType::Int64)],
-        );
+        let target = schema(0, vec![SchemaField::new(1, "new_col", FluxDType::Int64)]);
         // File schema has nothing in common with target.
-        let file_schema = schema(
-            0,
-            vec![SchemaField::new(99, "other", FluxDType::Utf8)],
-        );
+        let file_schema = schema(0, vec![SchemaField::new(99, "other", FluxDType::Utf8)]);
         let plan = build_file_plan(&target, Some(&file_schema), &["other".into()], 12).unwrap();
         assert!(plan.is_pure_fill());
     }

@@ -3,9 +3,9 @@
 
 //! `fluxcapacitor inspect` — print the Atlas metadata footer of a `.flux` file.
 
-use std::path::Path;
 use anyhow::Result;
 use loom::atlas::AtlasFooter;
+use std::path::Path;
 
 pub fn cmd_inspect(path: &Path, format: &str) -> Result<()> {
     let bytes = std::fs::read(path)?;
@@ -13,17 +13,14 @@ pub fn cmd_inspect(path: &Path, format: &str) -> Result<()> {
 
     match format {
         "json" => print_json(&footer),
-        _      => print_table(&footer, &bytes),
+        _ => print_table(&footer, &bytes),
     }
     Ok(())
 }
 
 fn print_table(footer: &AtlasFooter, raw: &[u8]) {
     println!("╔══ Atlas Footer ══════════════════════════════════════════════════════╗");
-    println!(
-        "  File size : {}",
-        crate::human_size(raw.len())
-    );
+    println!("  File size : {}", crate::human_size(raw.len()));
     println!("  Blocks    : {}", footer.blocks.len());
     println!();
     println!(
@@ -34,11 +31,7 @@ fn print_table(footer: &AtlasFooter, raw: &[u8]) {
     for (i, b) in footer.blocks.iter().enumerate() {
         println!(
             "  {:>6}  {:>14}  {:>20}  {:>20}  {:>12?}",
-            i,
-            b.block_offset,
-            b.z_min,
-            b.z_max,
-            b.strategy,
+            i, b.block_offset, b.z_min, b.z_max, b.strategy,
         );
     }
     println!("╚══════════════════════════════════════════════════════════════════════╝");

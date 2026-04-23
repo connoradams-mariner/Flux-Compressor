@@ -152,7 +152,9 @@ mod tests {
         let mut entry = empty_entry(1, Operation::Append);
         entry.data_files_added = vec!["data/part-0001.flux".into()];
         entry.row_count_delta = 100_000;
-        entry.metadata = [("user".into(), "spark-job-42".into())].into_iter().collect();
+        entry.metadata = [("user".into(), "spark-job-42".into())]
+            .into_iter()
+            .collect();
 
         let json = entry.to_json().unwrap();
         let parsed = LogEntry::from_json(json.as_bytes()).unwrap();

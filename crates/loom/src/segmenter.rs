@@ -8,8 +8,8 @@
 //! splits at drift boundaries where the optimal strategy changes.
 
 use crate::{
-    PROBE_SIZE, MAX_SEGMENT_SIZE,
-    loom_classifier::{classify, LoomStrategy},
+    MAX_SEGMENT_SIZE, PROBE_SIZE,
+    loom_classifier::{LoomStrategy, classify},
 };
 
 /// A segment produced by the adaptive segmenter: a slice of values and the
@@ -46,9 +46,7 @@ pub fn adaptive_segment<'a>(
         let probe_end = (pos + PROBE_SIZE).min(values.len());
         let probe = &values[pos..probe_end];
 
-        let base_strategy = force_strategy.unwrap_or_else(|| {
-            classify(probe).strategy
-        });
+        let base_strategy = force_strategy.unwrap_or_else(|| classify(probe).strategy);
 
         // 2. Grow: extend while the next probe classifies the same.
         //    Use geometric stride: check drift less often as the segment grows.
@@ -113,10 +111,7 @@ pub fn adaptive_segment_u64(
 
         let base_strategy = force_strategy.unwrap_or_else(|| {
             // Widen only the small probe window (1024 values = 16KB).
-            let probe_u128: Vec<u128> = values[pos..probe_end]
-                .iter()
-                .map(|&v| v as u128)
-                .collect();
+            let probe_u128: Vec<u128> = values[pos..probe_end].iter().map(|&v| v as u128).collect();
             classify(&probe_u128).strategy
         });
 
@@ -134,10 +129,8 @@ pub fn adaptive_segment_u64(
                 }
 
                 // Widen only the small check window.
-                let probe_u128: Vec<u128> = values[end..check_end]
-                    .iter()
-                    .map(|&v| v as u128)
-                    .collect();
+                let probe_u128: Vec<u128> =
+                    values[end..check_end].iter().map(|&v| v as u128).collect();
                 let next_strategy = classify(&probe_u128).strategy;
                 if next_strategy != base_strategy {
                     break;

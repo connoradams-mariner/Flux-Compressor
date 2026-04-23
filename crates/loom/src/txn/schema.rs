@@ -337,10 +337,7 @@ mod tests {
             "id",
             FluxDType::UInt64,
         )]));
-        assert_eq!(
-            chain.get(0).unwrap().fields[0].dtype,
-            FluxDType::UInt64
-        );
+        assert_eq!(chain.get(0).unwrap().fields[0].dtype, FluxDType::UInt64);
     }
 
     #[test]

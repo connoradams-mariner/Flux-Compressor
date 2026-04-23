@@ -29,9 +29,9 @@
 //! inside `compressors/string_compressor.rs`; the primitive below is
 //! already in the public surface and benched.
 
+use arrow::array::ArrayDataBuilder;
 use arrow_array::StringArray;
 use arrow_buffer::{Buffer, OffsetBuffer};
-use arrow::array::ArrayDataBuilder;
 use arrow_schema::DataType;
 
 use crate::error::{FluxError, FluxResult};
@@ -53,10 +53,7 @@ use crate::error::{FluxError, FluxResult};
 /// UTF-8 re-validation on the hot path.
 ///
 /// [`ArrayData`]: arrow_data::ArrayData
-pub fn string_array_from_parts(
-    offsets: Vec<i32>,
-    values: Vec<u8>,
-) -> FluxResult<StringArray> {
+pub fn string_array_from_parts(offsets: Vec<i32>, values: Vec<u8>) -> FluxResult<StringArray> {
     if offsets.is_empty() {
         return Err(FluxError::Internal(
             "string_array_from_parts: offsets must have at least one element".into(),

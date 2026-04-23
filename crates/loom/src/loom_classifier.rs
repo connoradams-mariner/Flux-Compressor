@@ -20,15 +20,15 @@ use crate::bit_io::bits_needed;
 #[repr(u16)]
 pub enum LoomStrategy {
     /// Run-Length Encoding — optimal for constant / near-constant columns.
-    Rle         = 0x0001,
+    Rle = 0x0001,
     /// Delta-Delta Encoding — optimal for sorted or monotone sequences.
-    DeltaDelta  = 0x0002,
+    DeltaDelta = 0x0002,
     /// Dictionary Encoding — optimal for low-cardinality string/enum columns.
-    Dictionary  = 0x0003,
+    Dictionary = 0x0003,
     /// Bit-Slab with optional Outlier Map — optimal for numeric range data.
-    BitSlab     = 0x0004,
+    BitSlab = 0x0004,
     /// SIMD-accelerated LZ4 — fallback for high-entropy data.
-    SimdLz4     = 0x0005,
+    SimdLz4 = 0x0005,
 }
 
 /// Bit flag in the strategy_mask u16 indicating u64-only mode.
@@ -129,8 +129,7 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
     // catastrophic. Guard the RLE path with an endpoint-equality sanity
     // check: for a truly constant column, first == mid == last.
     let endpoints_equal = values.len() < 3
-        || (values[0] == values[values.len() / 2]
-            && values[0] == values[values.len() - 1]);
+        || (values[0] == values[values.len() / 2] && values[0] == values[values.len() - 1]);
 
     if entropy < 1e-9 && endpoints_equal {
         // All values identical → RLE.
@@ -189,7 +188,11 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
     let max_width = *bit_widths.last().unwrap();
 
     let use_outlier_map = max_width > p99_width.saturating_add(32);
-    let slab_width = if use_outlier_map { p99_width } else { max_width };
+    let slab_width = if use_outlier_map {
+        p99_width
+    } else {
+        max_width
+    };
     let slab_width = slab_width.clamp(1, 64);
 
     // If all widths fit comfortably, use BitSlab.
@@ -235,7 +238,11 @@ fn bit_entropy(values: &[u128]) -> f64 {
     // on the top 8 *occupied* bits rather than bits 120-127 (which are
     // always zero for values that fit in a u64).
     let max_val = values.iter().copied().max().unwrap_or(0);
-    let msb = if max_val > 0 { 128 - max_val.leading_zeros() } else { 0 };
+    let msb = if max_val > 0 {
+        128 - max_val.leading_zeros()
+    } else {
+        0
+    };
     let shift = msb.saturating_sub(8);
 
     let mut counts = [0u32; 256];

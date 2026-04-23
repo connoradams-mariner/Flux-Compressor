@@ -22,7 +22,7 @@
 //! ```
 
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use tempfile::TempDir;
 
@@ -36,8 +36,8 @@ use loom::{
     dtype::FluxDType,
     traits::LoomCompressor,
     txn::{
-        schema::{SchemaField, TableSchema},
         EvolveOptions, FluxTable,
+        schema::{SchemaField, TableSchema},
     },
 };
 
@@ -94,20 +94,16 @@ fn bench_append(c: &mut Criterion) {
         let flux_bytes = compress(&batch);
 
         g.throughput(Throughput::Elements(rows as u64));
-        g.bench_with_input(
-            BenchmarkId::new("rows", rows),
-            &flux_bytes,
-            |b, bytes| {
-                // One fresh table per benchmark group iteration; each
-                // `b.iter` call appends to the same table (steady-state).
-                let tmp = TempDir::new().unwrap();
-                let tbl = open_table(&tmp, "append.fluxtable");
-                // One warm-up append before timing
-                tbl.append(bytes).unwrap();
+        g.bench_with_input(BenchmarkId::new("rows", rows), &flux_bytes, |b, bytes| {
+            // One fresh table per benchmark group iteration; each
+            // `b.iter` call appends to the same table (steady-state).
+            let tmp = TempDir::new().unwrap();
+            let tbl = open_table(&tmp, "append.fluxtable");
+            // One warm-up append before timing
+            tbl.append(bytes).unwrap();
 
-                b.iter(|| tbl.append(black_box(bytes)).unwrap());
-            },
-        );
+            b.iter(|| tbl.append(black_box(bytes)).unwrap());
+        });
     }
     g.finish();
 }
@@ -166,9 +162,7 @@ fn bench_evolve_schema(c: &mut Criterion) {
                 let tbl = open_table(&tmp, "evo.fluxtable");
                 (tmp, tbl) // hold tmp so the dir stays alive
             },
-            |(_tmp, tbl)| {
-                tbl.evolve_schema(black_box(schema_v2())).unwrap()
-            },
+            |(_tmp, tbl)| tbl.evolve_schema(black_box(schema_v2())).unwrap(),
             BatchSize::SmallInput,
         );
     });
@@ -188,19 +182,15 @@ fn bench_compress_and_append(c: &mut Criterion) {
         let batch = make_batch(schema.clone(), rows, 0);
         g.throughput(Throughput::Elements(rows as u64));
 
-        g.bench_with_input(
-            BenchmarkId::new("rows", rows),
-            &batch,
-            |b, batch| {
-                let tmp = TempDir::new().unwrap();
-                let tbl = open_table(&tmp, "e2e.fluxtable");
+        g.bench_with_input(BenchmarkId::new("rows", rows), &batch, |b, batch| {
+            let tmp = TempDir::new().unwrap();
+            let tbl = open_table(&tmp, "e2e.fluxtable");
 
-                b.iter(|| {
-                    let bytes = FluxWriter::new().compress(black_box(batch)).unwrap();
-                    tbl.append(&bytes).unwrap();
-                });
-            },
-        );
+            b.iter(|| {
+                let bytes = FluxWriter::new().compress(black_box(batch)).unwrap();
+                tbl.append(&bytes).unwrap();
+            });
+        });
     }
     g.finish();
 }

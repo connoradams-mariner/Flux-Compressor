@@ -11,19 +11,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{Array, BooleanArray, RecordBatch};
 
+use super::log_entry::{Action, LogEntry, Operation};
+use super::mutation::{
+    DeleteStats, MatchedAction, MergeClauses, MergeStats, MutationAction, NotMatchedAction,
+    ScalarValue, UpdateStats, apply_update_set, compress_batch, concat_batches, count_true,
+    filter_batch, invert_mask, predicate_repr, read_file_batch,
+};
+use super::partition::{FileManifest, TableMeta};
+use super::projection::{FilePlan, build_file_plan};
+use super::schema::{PromotedFrom, SchemaChain, TableSchema};
+use super::snapshot::Snapshot;
 use crate::decompressors::flux_reader::FluxReader;
 use crate::error::{FluxError, FluxResult};
 use crate::traits::Predicate;
-use super::log_entry::{Action, LogEntry, Operation};
-use super::mutation::{
-    apply_update_set, compress_batch, concat_batches, count_true, filter_batch, invert_mask,
-    predicate_repr, read_file_batch, DeleteStats, MatchedAction, MergeClauses, MergeStats,
-    MutationAction, NotMatchedAction, ScalarValue, UpdateStats,
-};
-use super::partition::{FileManifest, TableMeta};
-use super::projection::{build_file_plan, FilePlan};
-use super::schema::{PromotedFrom, SchemaChain, TableSchema};
-use super::snapshot::Snapshot;
 
 /// A FluxCompress table backed by a `.fluxtable/` directory.
 ///
@@ -54,7 +54,9 @@ pub struct EvolveOptions {
 impl EvolveOptions {
     /// Shortcut for `EvolveOptions { allow_null_tightening: true }`.
     pub fn with_null_tightening() -> Self {
-        Self { allow_null_tightening: true }
+        Self {
+            allow_null_tightening: true,
+        }
     }
 }
 
@@ -62,10 +64,8 @@ impl FluxTable {
     /// Open or create a FluxTable at the given directory path.
     pub fn open(root: impl AsRef<Path>) -> FluxResult<Self> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("_flux_log"))
-            .map_err(|e| FluxError::Io(e))?;
-        fs::create_dir_all(root.join("data"))
-            .map_err(|e| FluxError::Io(e))?;
+        fs::create_dir_all(root.join("_flux_log")).map_err(|e| FluxError::Io(e))?;
+        fs::create_dir_all(root.join("data")).map_err(|e| FluxError::Io(e))?;
         Ok(Self { root })
     }
 
@@ -227,10 +227,7 @@ impl FluxTable {
     /// Shared prep for every append path: allocate the next version,
     /// name the data file, write the bytes, and extract the row
     /// count + current schema id.
-    fn prepare_append(
-        &self,
-        flux_data: &[u8],
-    ) -> FluxResult<(u64, String, i64, u64, Option<u32>)> {
+    fn prepare_append(&self, flux_data: &[u8]) -> FluxResult<(u64, String, i64, u64, Option<u32>)> {
         let version = self.next_version()?;
         let filename = format!("part-{:04}.flux", version);
         let data_path = self.data_dir().join(&filename);
@@ -265,7 +262,11 @@ impl FluxTable {
         let entry = LogEntry {
             version,
             timestamp_ms: Self::now_ms(),
-            operation: if version == 0 { Operation::Create } else { Operation::Append },
+            operation: if version == 0 {
+                Operation::Create
+            } else {
+                Operation::Append
+            },
             data_files_added: vec![relative],
             data_files_removed: vec![],
             file_manifests: vec![manifest],
@@ -393,9 +394,9 @@ impl FluxTable {
     /// evolve_schema share the same serialization / fsync path.
     fn write_log_entry(&self, entry: &LogEntry) -> FluxResult<()> {
         let log_path = self.log_dir().join(entry.filename());
-        let json = entry.to_json().map_err(|e| {
-            FluxError::Internal(format!("serialize log entry: {e}"))
-        })?;
+        let json = entry
+            .to_json()
+            .map_err(|e| FluxError::Internal(format!("serialize log entry: {e}")))?;
         fs::write(&log_path, json.as_bytes()).map_err(|e| FluxError::Io(e))?;
         Ok(())
     }
@@ -520,7 +521,10 @@ impl FluxTable {
 
                 let bytes = compress_batch(&kept_batch)?;
 
-                let filename = format!("part-{version:04}-{path_idx}.flux", path_idx = stats.files_rewritten);
+                let filename = format!(
+                    "part-{version:04}-{path_idx}.flux",
+                    path_idx = stats.files_rewritten
+                );
                 let write_path = self.data_dir().join(&filename);
                 let relative = format!("data/{filename}");
                 fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
@@ -576,10 +580,13 @@ impl FluxTable {
         // don't want to churn its public API just for this shim.
         let mut json_val = serde_json::to_value(&entry).unwrap();
         let action_val = serde_json::to_value(&action).unwrap();
-        json_val.as_object_mut().unwrap()
+        json_val
+            .as_object_mut()
+            .unwrap()
             .entry("actions".to_string())
             .or_insert_with(|| serde_json::Value::Array(vec![]))
-            .as_array_mut().unwrap()
+            .as_array_mut()
+            .unwrap()
             .push(action_val);
 
         let json = serde_json::to_string_pretty(&json_val).unwrap();
@@ -623,7 +630,10 @@ impl FluxTable {
             let updated_batch = apply_update_set(&batch, &mask, &set)?;
             let bytes = compress_batch(&updated_batch)?;
 
-            let filename = format!("part-{version:04}-{path_idx}.flux", path_idx = stats.files_rewritten);
+            let filename = format!(
+                "part-{version:04}-{path_idx}.flux",
+                path_idx = stats.files_rewritten
+            );
             let write_path = self.data_dir().join(&filename);
             let relative = format!("data/{filename}");
             fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
@@ -671,10 +681,13 @@ impl FluxTable {
 
         let mut json_val = serde_json::to_value(&entry).unwrap();
         let action_val = serde_json::to_value(&action).unwrap();
-        json_val.as_object_mut().unwrap()
+        json_val
+            .as_object_mut()
+            .unwrap()
             .entry("actions".to_string())
             .or_insert_with(|| serde_json::Value::Array(vec![]))
-            .as_array_mut().unwrap()
+            .as_array_mut()
+            .unwrap()
             .push(action_val);
         // Override the `operation` key to the extended `"update"` tag.
         // Older Rust readers deserialize unknown operation strings as
@@ -788,8 +801,13 @@ impl FluxTable {
                     stats.rows_deleted += n_matched as u64;
                     stats.files_rewritten += 1;
                     emit_merge_file(
-                        self, version, stats.files_rewritten,
-                        &kept, manifest, &mut data_files_added, &mut manifests_added,
+                        self,
+                        version,
+                        stats.files_rewritten,
+                        &kept,
+                        manifest,
+                        &mut data_files_added,
+                        &mut manifests_added,
                     )?;
                 }
                 Some(MatchedAction::UpdateFromSource(cols_to_update)) => {
@@ -808,8 +826,13 @@ impl FluxTable {
                     stats.rows_updated += n_matched as u64;
                     stats.files_rewritten += 1;
                     emit_merge_file(
-                        self, version, stats.files_rewritten,
-                        &new_batch, manifest, &mut data_files_added, &mut manifests_added,
+                        self,
+                        version,
+                        stats.files_rewritten,
+                        &new_batch,
+                        manifest,
+                        &mut data_files_added,
+                        &mut manifests_added,
                     )?;
                 }
             }
@@ -832,8 +855,10 @@ impl FluxTable {
                 let taken_cols: Vec<arrow_array::ArrayRef> = source
                     .columns()
                     .iter()
-                    .map(|c| arrow::compute::take(c.as_ref(), &indices_arr, None)
-                        .map_err(|e| FluxError::Internal(format!("take: {e}"))))
+                    .map(|c| {
+                        arrow::compute::take(c.as_ref(), &indices_arr, None)
+                            .map_err(|e| FluxError::Internal(format!("take: {e}")))
+                    })
                     .collect::<FluxResult<Vec<_>>>()?;
                 let inserted_batch = RecordBatch::try_new(source.schema(), taken_cols)
                     .map_err(|e| FluxError::Internal(format!("merge insert: {e}")))?;
@@ -887,10 +912,13 @@ impl FluxTable {
 
         let mut json_val = serde_json::to_value(&entry).unwrap();
         let action_val = serde_json::to_value(&action).unwrap();
-        json_val.as_object_mut().unwrap()
+        json_val
+            .as_object_mut()
+            .unwrap()
             .entry("actions".to_string())
             .or_insert_with(|| serde_json::Value::Array(vec![]))
-            .as_array_mut().unwrap()
+            .as_array_mut()
+            .unwrap()
             .push(action_val);
 
         let json = serde_json::to_string_pretty(&json_val).unwrap();
@@ -911,9 +939,7 @@ impl FluxTable {
 /// `Display` stability of the wrapped numeric types. Nulls become
 /// `None` so they never match anything (SQL NULL semantics).
 fn extract_join_keys(col: &dyn Array) -> FluxResult<Vec<Option<String>>> {
-    use arrow_array::{
-        Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
-    };
+    use arrow_array::{Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array};
     use arrow_schema::DataType;
 
     let n = col.len();
@@ -922,31 +948,51 @@ fn extract_join_keys(col: &dyn Array) -> FluxResult<Vec<Option<String>>> {
         DataType::Int64 => {
             let a = col.as_any().downcast_ref::<Int64Array>().unwrap();
             for i in 0..n {
-                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+                out.push(if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                });
             }
         }
         DataType::UInt64 => {
             let a = col.as_any().downcast_ref::<UInt64Array>().unwrap();
             for i in 0..n {
-                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+                out.push(if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                });
             }
         }
         DataType::Int32 => {
             let a = col.as_any().downcast_ref::<Int32Array>().unwrap();
             for i in 0..n {
-                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+                out.push(if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                });
             }
         }
         DataType::UInt32 => {
             let a = col.as_any().downcast_ref::<UInt32Array>().unwrap();
             for i in 0..n {
-                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+                out.push(if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                });
             }
         }
         DataType::Utf8 => {
             let a = col.as_any().downcast_ref::<StringArray>().unwrap();
             for i in 0..n {
-                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+                out.push(if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_string())
+                });
             }
         }
         other => {
@@ -993,7 +1039,8 @@ fn apply_merge_update(
             // Source column must exist and match dtype.
             let s_idx = source.schema().index_of(field.name()).map_err(|_| {
                 FluxError::Internal(format!(
-                    "MERGE WHEN MATCHED UPDATE column '{}' missing from source", field.name()
+                    "MERGE WHEN MATCHED UPDATE column '{}' missing from source",
+                    field.name()
                 ))
             })?;
             let s_col = source.column(s_idx);
@@ -1085,8 +1132,7 @@ impl FluxScan {
 
         // live_manifests is a BTreeMap<String, FileManifest> keyed by
         // path; iterating gives us a deterministic file order.
-        let manifests: Vec<FileManifest> =
-            snap.live_manifests.values().cloned().collect();
+        let manifests: Vec<FileManifest> = snap.live_manifests.values().cloned().collect();
 
         Ok(Self {
             root: table.root.clone(),
@@ -1250,9 +1296,7 @@ fn validate_schema_transition(
     }
 
     // Resolve the parent schema from the chain, if any.
-    let parent = new_schema
-        .parent_schema_id
-        .and_then(|pid| chain.get(pid));
+    let parent = new_schema.parent_schema_id.and_then(|pid| chain.get(pid));
 
     // 2. Per-field checks against the parent.
     if let Some(parent) = parent {
@@ -1268,8 +1312,7 @@ fn validate_schema_transition(
                         "field_id {} ('{}'): dtype change {:?} → {:?} is not a \
                          permitted promotion; narrowing and cross-family changes \
                          require a rewrite (see Phase 2 mutations)",
-                        new_field.field_id, new_field.name,
-                        parent_field.dtype, new_field.dtype,
+                        new_field.field_id, new_field.name, parent_field.dtype, new_field.dtype,
                     )));
                 }
                 if parent_field.nullable && !new_field.nullable {
@@ -1285,9 +1328,7 @@ fn validate_schema_transition(
                             new_field.field_id, new_field.name,
                         )));
                     }
-                    check_null_tightening_proof(
-                        chain, snap, new_field,
-                    )?;
+                    check_null_tightening_proof(chain, snap, new_field)?;
                 }
             } else {
                 // Brand-new field_id — Phase B requires a default for
@@ -1352,9 +1393,7 @@ fn check_null_tightening_proof(
     );
 
     for (path, manifest) in &snap.live_manifests {
-        let file_schema = manifest
-            .schema_id
-            .and_then(|sid| chain.get(sid));
+        let file_schema = manifest.schema_id.and_then(|sid| chain.get(sid));
 
         let file_schema = match file_schema {
             Some(s) => s,
@@ -1391,8 +1430,7 @@ fn check_null_tightening_proof(
                         "null-tightening proof failed: file '{path}' reports \
                          null_count={} for '{}' (field_id {}); tightening \
                          would drop or misread {} rows",
-                        stats.null_count, fs_field.name,
-                        tightened_field.field_id, stats.null_count,
+                        stats.null_count, fs_field.name, tightened_field.field_id, stats.null_count,
                     )));
                 }
             }
@@ -1537,17 +1575,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let table = FluxTable::open(tmp.path().join("t.fluxtable")).unwrap();
         table
-            .evolve_schema(TableSchema::new(vec![
-                SchemaField::new(1, "v", FluxDType::Int64),
-            ]))
+            .evolve_schema(TableSchema::new(vec![SchemaField::new(
+                1,
+                "v",
+                FluxDType::Int64,
+            )]))
             .unwrap();
         // Narrowing is always rejected — data would be lossy.
         let err = table
-            .evolve_schema(TableSchema::new(vec![
-                SchemaField::new(1, "v", FluxDType::Int32),
-            ]))
+            .evolve_schema(TableSchema::new(vec![SchemaField::new(
+                1,
+                "v",
+                FluxDType::Int32,
+            )]))
             .unwrap_err();
-        assert!(matches!(err, FluxError::SchemaEvolution(ref m) if m.contains("not a permitted promotion")));
+        assert!(
+            matches!(err, FluxError::SchemaEvolution(ref m) if m.contains("not a permitted promotion"))
+        );
     }
 
     #[test]
@@ -1556,14 +1600,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let table = FluxTable::open(tmp.path().join("t.fluxtable")).unwrap();
         table
-            .evolve_schema(TableSchema::new(vec![
-                SchemaField::new(1, "v", FluxDType::Int32),
-            ]))
+            .evolve_schema(TableSchema::new(vec![SchemaField::new(
+                1,
+                "v",
+                FluxDType::Int32,
+            )]))
             .unwrap();
         table
-            .evolve_schema(TableSchema::new(vec![
-                SchemaField::new(1, "v", FluxDType::Int64),
-            ]))
+            .evolve_schema(TableSchema::new(vec![SchemaField::new(
+                1,
+                "v",
+                FluxDType::Int64,
+            )]))
             .unwrap();
         let snap = table.snapshot().unwrap();
         let v1 = snap.schema_chain.get(1).unwrap();
@@ -1639,18 +1687,13 @@ mod tests {
 
     /// Compress a small RecordBatch into a `.flux` blob suitable for
     /// `FluxTable::append`, exercising the full write/read pipeline.
-    fn compress_batch(
-        batch: &arrow_array::RecordBatch,
-    ) -> Vec<u8> {
+    fn compress_batch(batch: &arrow_array::RecordBatch) -> Vec<u8> {
         use crate::compressors::flux_writer::FluxWriter;
         use crate::traits::LoomCompressor;
         FluxWriter::new().compress(batch).unwrap()
     }
 
-    fn batch_id_name(
-        ids: &[u64],
-        names: &[&str],
-    ) -> arrow_array::RecordBatch {
+    fn batch_id_name(ids: &[u64], names: &[&str]) -> arrow_array::RecordBatch {
         use arrow_array::{RecordBatch, StringArray, UInt64Array};
         use arrow_schema::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -1685,9 +1728,7 @@ mod tests {
             use arrow_array::{RecordBatch, UInt64Array};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::UInt64, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(UInt64Array::from(vec![10u64, 11, 12]))],
@@ -1748,9 +1789,7 @@ mod tests {
             use arrow_array::{RecordBatch, UInt64Array};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::UInt64, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(UInt64Array::from(vec![1u64, 2, 3, 4]))],
@@ -1780,11 +1819,7 @@ mod tests {
         // older file.
         use arrow_array::StringArray;
         assert_eq!(b.column(1).null_count(), 0);
-        let region = b
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        let region = b.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         for i in 0..b.num_rows() {
             assert_eq!(region.value(i), "unknown");
         }
@@ -1834,7 +1869,10 @@ mod tests {
             ]))
             .unwrap();
         table
-            .append(&compress_batch(&batch_id_name(&[7, 8], &["hello", "world"])))
+            .append(&compress_batch(&batch_id_name(
+                &[7, 8],
+                &["hello", "world"],
+            )))
             .unwrap();
 
         // v2: rename name → label (same field_id).
@@ -1853,11 +1891,7 @@ mod tests {
 
         // Values survived the rename untouched.
         use arrow_array::StringArray;
-        let label = b
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        let label = b.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(label.value(0), "hello");
         assert_eq!(label.value(1), "world");
     }
@@ -1956,17 +1990,9 @@ mod tests {
 
         // And `label` carries the renamed-from-`name` data across both.
         use arrow_array::StringArray;
-        let v0_label = v0
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        let v0_label = v0.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(v0_label.value(0), "a");
-        let v1_label = v1
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
+        let v1_label = v1.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(v1_label.value(0), "z");
     }
 
@@ -1990,12 +2016,17 @@ mod tests {
             use arrow_array::{Int32Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::Int32, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
             RecordBatch::try_new(
                 schema,
-                vec![Arc::new(Int32Array::from(vec![-7i32, -1, 0, 1, i32::MAX, i32::MIN]))],
+                vec![Arc::new(Int32Array::from(vec![
+                    -7i32,
+                    -1,
+                    0,
+                    1,
+                    i32::MAX,
+                    i32::MIN,
+                ]))],
             )
             .unwrap()
         };
@@ -2039,9 +2070,7 @@ mod tests {
             use arrow_array::{RecordBatch, UInt8Array};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::UInt8, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt8, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(UInt8Array::from(vec![0u8, 1, 42, 200, 255]))],
@@ -2084,9 +2113,7 @@ mod tests {
             use arrow_array::{Float32Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::Float32, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float32, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(Float32Array::from(vec![
@@ -2132,9 +2159,7 @@ mod tests {
             use arrow_array::{RecordBatch, StringArray};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("s", DataType::Utf8, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"]))],
@@ -2182,13 +2207,16 @@ mod tests {
             use arrow_array::{Int64Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::Int64, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(Int64Array::from(vec![
-                    -1_000_000_000_000i64, -1, 0, 1, i64::MAX, i64::MIN,
+                    -1_000_000_000_000i64,
+                    -1,
+                    0,
+                    1,
+                    i64::MAX,
+                    i64::MIN,
                 ]))],
             )
             .unwrap()
@@ -2235,13 +2263,15 @@ mod tests {
             use arrow_array::{RecordBatch, UInt64Array};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::UInt64, false),
-            ]));
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)]));
             RecordBatch::try_new(
                 schema,
                 vec![Arc::new(UInt64Array::from(vec![
-                    0u64, 1, 42, u32::MAX as u64, u64::MAX,
+                    0u64,
+                    1,
+                    42,
+                    u32::MAX as u64,
+                    u64::MAX,
                 ]))],
             )
             .unwrap()
@@ -2291,14 +2321,9 @@ mod tests {
             use arrow_array::{Int32Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::Int32, false),
-            ]));
-            RecordBatch::try_new(
-                schema,
-                vec![Arc::new(Int32Array::from(vec![1i32, 2, 3]))],
-            )
-            .unwrap()
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1i32, 2, 3]))])
+                .unwrap()
         };
         table.append(&compress_batch(&batch_i32)).unwrap();
 
@@ -2314,14 +2339,9 @@ mod tests {
             use arrow_array::{Int64Array, RecordBatch};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("v", DataType::Int64, false),
-            ]));
-            RecordBatch::try_new(
-                schema,
-                vec![Arc::new(Int64Array::from(vec![100i64, 200]))],
-            )
-            .unwrap()
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![100i64, 200]))])
+                .unwrap()
         };
         table.append(&compress_batch(&batch_i64)).unwrap();
 
@@ -2361,14 +2381,8 @@ mod tests {
         use arrow_array::{Int64Array, RecordBatch};
         use arrow_schema::{DataType, Field, Schema};
         use std::sync::Arc;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(col, DataType::Int64, true),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(values))],
-        )
-        .unwrap()
+        let schema = Arc::new(Schema::new(vec![Field::new(col, DataType::Int64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
     }
 
     /// Build a FileManifest with only a `null_count` stat for the
@@ -2377,15 +2391,19 @@ mod tests {
         let mut stats = HashMap::new();
         stats.insert(
             col.to_string(),
-            ColumnStats { min: None, max: None, null_count },
+            ColumnStats {
+                min: None,
+                max: None,
+                null_count,
+            },
         );
         FileManifest {
-            path: String::new(),      // filled in by append_with_manifest
+            path: String::new(), // filled in by append_with_manifest
             partition_values: Default::default(),
             spec_id: 0,
-            schema_id: None,          // filled in by append_with_manifest
-            row_count: 0,             // filled in by append_with_manifest
-            file_size_bytes: 0,       // filled in by append_with_manifest
+            schema_id: None,    // filled in by append_with_manifest
+            row_count: 0,       // filled in by append_with_manifest
+            file_size_bytes: 0, // filled in by append_with_manifest
             column_stats: stats,
             column_stats_by_field_id: Default::default(),
         }
@@ -2411,7 +2429,10 @@ mod tests {
             .unwrap();
 
         let snap = table.snapshot().unwrap();
-        let s = snap.schema_chain.get(snap.current_schema_id().unwrap()).unwrap();
+        let s = snap
+            .schema_chain
+            .get(snap.current_schema_id().unwrap())
+            .unwrap();
         assert!(!s.field_by_id(1).unwrap().nullable);
     }
 
@@ -2491,7 +2512,14 @@ mod tests {
         // have written any log entry.
         let snap = table.snapshot().unwrap();
         assert!(snap.schema_chain.get(1).is_none());
-        assert!(snap.schema_chain.get(0).unwrap().field_by_id(1).unwrap().nullable);
+        assert!(
+            snap.schema_chain
+                .get(0)
+                .unwrap()
+                .field_by_id(1)
+                .unwrap()
+                .nullable
+        );
     }
 
     #[test]
@@ -2576,14 +2604,9 @@ mod tests {
             use arrow_array::{RecordBatch, UInt64Array};
             use arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::UInt64, false),
-            ]));
-            RecordBatch::try_new(
-                schema,
-                vec![Arc::new(UInt64Array::from(vec![10u64, 11]))],
-            )
-            .unwrap()
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![10u64, 11]))])
+                .unwrap()
         };
         table.append(&compress_batch(&batch_v0)).unwrap();
 
@@ -2688,7 +2711,11 @@ mod tests {
         let mut id_stats: HashMap<u32, ColumnStats> = HashMap::new();
         id_stats.insert(
             1u32,
-            ColumnStats { min: None, max: None, null_count: 0 },
+            ColumnStats {
+                min: None,
+                max: None,
+                null_count: 0,
+            },
         );
         let manifest = FileManifest {
             path: String::new(),
@@ -2697,8 +2724,8 @@ mod tests {
             schema_id: None,
             row_count: 0,
             file_size_bytes: 0,
-            column_stats: Default::default(),        // intentionally empty
-            column_stats_by_field_id: id_stats,      // only id-keyed proof
+            column_stats: Default::default(), // intentionally empty
+            column_stats_by_field_id: id_stats, // only id-keyed proof
         };
         table.append_with_manifest(&data, manifest).unwrap();
 

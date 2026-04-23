@@ -84,7 +84,11 @@ mod tests {
             0xDEAD_BEEF_0000_0000_CAFE_BABE_1234_5678,
         ] {
             let (hi, lo) = u128_to_jlong_pair(v);
-            assert_eq!(jlong_pair_to_u128(hi, lo), v, "round-trip failed for {v:#034x}");
+            assert_eq!(
+                jlong_pair_to_u128(hi, lo),
+                v,
+                "round-trip failed for {v:#034x}"
+            );
         }
     }
 }

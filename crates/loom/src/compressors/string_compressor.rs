@@ -40,16 +40,16 @@
 //! ```
 
 use arrow_array::array::Array;
-use arrow_array::{ArrayRef, StringArray, BinaryArray, LargeStringArray, LargeBinaryArray};
+use arrow_array::{ArrayRef, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
 use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
+use crate::CompressionProfile;
 use crate::dtype::FluxDType;
 use crate::error::{FluxError, FluxResult};
-use crate::CompressionProfile;
 
 // ── Brotli helpers ────────────────────────────────────────────────────────────
 
@@ -63,10 +63,10 @@ const BROTLI_QUALITY: u32 = 9;
 const BROTLI_LGWIN: u32 = 22;
 /// Minimum sub-block size for parallel Brotli: blocks smaller than this have
 /// too much rayon task-dispatch overhead relative to useful Brotli work.
-const BROTLI_PAR_BLOCK_MIN: usize = 256 * 1024;   // 256 KB
+const BROTLI_PAR_BLOCK_MIN: usize = 256 * 1024; // 256 KB
 /// Maximum sub-block size for parallel Brotli: blocks larger than this mean
 /// a small column only spawns 1-2 tasks, leaving most cores idle.
-const BROTLI_PAR_BLOCK_MAX: usize = 1_048_576;    // 1 MB
+const BROTLI_PAR_BLOCK_MAX: usize = 1_048_576; // 1 MB
 
 /// Compress `data` with Brotli quality 9 / 4 MB window.
 ///
@@ -76,12 +76,7 @@ const BROTLI_PAR_BLOCK_MAX: usize = 1_048_576;    // 1 MB
 pub(crate) fn brotli_compress(data: &[u8]) -> FluxResult<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len() / 2 + 64);
     {
-        let mut w = brotli::CompressorWriter::new(
-            &mut out,
-            4096,
-            BROTLI_QUALITY,
-            BROTLI_LGWIN,
-        );
+        let mut w = brotli::CompressorWriter::new(&mut out, 4096, BROTLI_QUALITY, BROTLI_LGWIN);
         w.write_all(data)
             .map_err(|e| FluxError::Internal(format!("brotli compress: {e}")))?;
     }
@@ -286,17 +281,23 @@ pub fn decompress_cross_column_group(
     dtype_tag: FluxDType,
 ) -> FluxResult<Vec<(u16, ArrayRef)>> {
     if data.len() < 2 || data[0] != TAG || data[1] != SUB_CROSS_GROUP {
-        return Err(FluxError::InvalidFile("not a cross-column group block".into()));
+        return Err(FluxError::InvalidFile(
+            "not a cross-column group block".into(),
+        ));
     }
     let mut cur = Cursor::new(data);
     let _tag = cur.read_u8()?;
-    let _sub  = cur.read_u8()?;
+    let _sub = cur.read_u8()?;
     let _total_rows = cur.read_u32::<LittleEndian>()? as usize;
     let col_count = cur.read_u8()? as usize;
     let mut column_ids = Vec::with_capacity(col_count);
-    for _ in 0..col_count { column_ids.push(cur.read_u16::<LittleEndian>()?); }
+    for _ in 0..col_count {
+        column_ids.push(cur.read_u16::<LittleEndian>()?);
+    }
     let mut row_counts = Vec::with_capacity(col_count);
-    for _ in 0..col_count { row_counts.push(cur.read_u32::<LittleEndian>()? as usize); }
+    for _ in 0..col_count {
+        row_counts.push(cur.read_u32::<LittleEndian>()? as usize);
+    }
     let inner_len = cur.read_u32::<LittleEndian>()? as usize;
     let inner_start = cur.position() as usize;
     let inner = &data[inner_start..inner_start + inner_len];
@@ -374,10 +375,7 @@ const CACHED_DICT_COMPRESS_LEVEL: i32 = 5;
 /// `SUB_RAW_ZSTD_DICT` block, skipping the FSST bakeoff — the dict already
 /// captures column-specific vocabulary patterns that FSST would otherwise
 /// exploit.
-pub fn compress_array_with_cached_dict(
-    array: &dyn Array,
-    dict: &[u8],
-) -> FluxResult<Vec<u8>> {
+pub fn compress_array_with_cached_dict(array: &dyn Array, dict: &[u8]) -> FluxResult<Vec<u8>> {
     use std::io::Write as _;
     let strings = extract_strings(array)?;
     let total_bytes: usize = strings.iter().map(|v| v.len()).sum();
@@ -393,12 +391,12 @@ pub fn compress_array_with_cached_dict(
     // Data compressed with the cached dict.
     let mut c = zstd::bulk::Compressor::with_dictionary(CACHED_DICT_COMPRESS_LEVEL, dict)
         .map_err(|e| FluxError::Internal(format!("zstd cached dict enc: {e}")))?;
-    let cd = c.compress(&data_buf)
+    let cd = c
+        .compress(&data_buf)
         .map_err(|e| FluxError::Internal(format!("zstd cached dict compress: {e}")))?;
 
-    let mut buf = Vec::with_capacity(
-        1 + 1 + 4 + 4 + dict.len() + 4 + offsets_block.len() + 4 + cd.len()
-    );
+    let mut buf =
+        Vec::with_capacity(1 + 1 + 4 + 4 + dict.len() + 4 + offsets_block.len() + 4 + cd.len());
     buf.write_u8(TAG)?;
     buf.write_u8(SUB_RAW_ZSTD_DICT)?;
     buf.write_u32::<LittleEndian>(strings.len() as u32)?;
@@ -534,10 +532,7 @@ pub fn compress_strings_with_profile(
 ///    destroys by rewriting into opaque codes.
 /// 3. Small columns → raw wins trivially because FSST's fixed training cost
 ///    (and the ~1 KB symbol table overhead) doesn't amortise.
-fn compress_high_cardinality(
-    values: &[&[u8]],
-    profile: CompressionProfile,
-) -> FluxResult<Vec<u8>> {
+fn compress_high_cardinality(values: &[&[u8]], profile: CompressionProfile) -> FluxResult<Vec<u8>> {
     let total_bytes: usize = values.iter().map(|v| v.len()).sum();
 
     // Columns below the training-amortisation threshold skip FSST entirely.
@@ -572,7 +567,7 @@ fn compress_high_cardinality(
 
     // Probe secondary-codec sizes.  The probe must use the same codec the full
     // column will use so that FSST-vs-raw decisions are consistent.
-    let raw_secondary_len  = secondary_size(&raw_flat,  profile)?;
+    let raw_secondary_len = secondary_size(&raw_flat, profile)?;
     let fsst_secondary_len = secondary_size(&fsst_flat, profile)?;
 
     // For Archive, optionally train a zstd dictionary and check whether
@@ -611,18 +606,26 @@ fn compress_high_cardinality(
     let use_fsst = fsst_qualifies;
 
     // Does the dict help on the chosen branch?
-    let base_len = if use_fsst { fsst_secondary_len } else { raw_secondary_len };
-    let dict_len = if use_fsst { fsst_dict_len } else { raw_dict_len };
+    let base_len = if use_fsst {
+        fsst_secondary_len
+    } else {
+        raw_secondary_len
+    };
+    let dict_len = if use_fsst {
+        fsst_dict_len
+    } else {
+        raw_dict_len
+    };
     let use_dict = match (zstd_dict.as_ref(), dict_len) {
         (Some(_), Some(dl)) => (dl as f64) < (base_len as f64) * ZSTD_DICT_WIN_MARGIN,
         _ => false,
     };
 
     match (use_fsst, use_dict) {
-        (true,  false) => compress_fsst(values, &compressor, profile),
-        (true,  true)  => compress_fsst_with_dict(values, &compressor, zstd_dict.unwrap()),
+        (true, false) => compress_fsst(values, &compressor, profile),
+        (true, true) => compress_fsst_with_dict(values, &compressor, zstd_dict.unwrap()),
         (false, false) => compress_raw(values, profile),
-        (false, true)  => compress_raw_with_dict(values, zstd_dict.unwrap()),
+        (false, true) => compress_raw_with_dict(values, zstd_dict.unwrap()),
     }
 }
 
@@ -649,7 +652,8 @@ fn train_zstd_dict(values: &[&[u8]]) -> FluxResult<Vec<u8>> {
 fn zstd_with_dict_size(bytes: &[u8], dict: &[u8]) -> FluxResult<usize> {
     let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
-    let out = c.compress(bytes)
+    let out = c
+        .compress(bytes)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
     Ok(out.len())
 }
@@ -659,11 +663,9 @@ fn zstd_with_dict_size(bytes: &[u8], dict: &[u8]) -> FluxResult<usize> {
 /// `compress_raw` will actually apply to the full column.
 fn secondary_size(bytes: &[u8], profile: CompressionProfile) -> FluxResult<usize> {
     match profile.secondary_codec() {
-        crate::SecondaryCodec::Zstd => {
-            zstd::stream::encode_all(bytes, ZSTD_STRING_LEVEL)
-                .map(|v| v.len())
-                .map_err(|e| FluxError::Internal(format!("zstd probe: {e}")))
-        }
+        crate::SecondaryCodec::Zstd => zstd::stream::encode_all(bytes, ZSTD_STRING_LEVEL)
+            .map(|v| v.len())
+            .map_err(|e| FluxError::Internal(format!("zstd probe: {e}"))),
         crate::SecondaryCodec::Brotli => {
             // Use fast Zstd as a proxy for the bakeoff probe.  The FSST-vs-raw
             // decision correlates well across codecs — if FSST beats raw under
@@ -747,7 +749,9 @@ fn read_varint(buf: &[u8], pos: usize) -> FluxResult<(u64, usize)> {
     let mut p = pos;
     loop {
         if p >= buf.len() {
-            return Err(FluxError::InvalidFile("front-coded: varint truncated".into()));
+            return Err(FluxError::InvalidFile(
+                "front-coded: varint truncated".into(),
+            ));
         }
         let b = buf[p];
         p += 1;
@@ -757,7 +761,9 @@ fn read_varint(buf: &[u8], pos: usize) -> FluxResult<(u64, usize)> {
         }
         shift += 7;
         if shift > 63 {
-            return Err(FluxError::InvalidFile("front-coded: varint overflow".into()));
+            return Err(FluxError::InvalidFile(
+                "front-coded: varint overflow".into(),
+            ));
         }
     }
     Ok((v, p))
@@ -828,7 +834,11 @@ fn decompress_front_coded(
             .map_err(|e| FluxError::Lz4(e.to_string()))?,
         2 => zstd::stream::decode_all(compressed)
             .map_err(|e| FluxError::Internal(format!("zstd front-coded: {e}")))?,
-        _ => return Err(FluxError::InvalidFile(format!("front-coded: bad codec {codec}"))),
+        _ => {
+            return Err(FluxError::InvalidFile(format!(
+                "front-coded: bad codec {codec}"
+            )));
+        }
     };
 
     // Reconstruct each row from (shared, suffix_len, suffix).
@@ -841,7 +851,9 @@ fn decompress_front_coded(
         let shared = shared as usize;
         let slen = slen as usize;
         if np + slen > decoded.len() {
-            return Err(FluxError::InvalidFile("front-coded: suffix out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "front-coded: suffix out of range".into(),
+            ));
         }
         if shared > prev.len() {
             return Err(FluxError::InvalidFile("front-coded: shared > prev".into()));
@@ -859,10 +871,7 @@ fn decompress_front_coded(
 /// Split `values` into fixed-row-count sub-blocks, compress each in parallel
 /// through the full adaptive pipeline, and emit a `SUB_MULTI` container.
 /// Uses `SUB_BLOCK_ROWS` per sub-block (the standard large-column path).
-fn compress_multi(
-    values: &[&[u8]],
-    profile: CompressionProfile,
-) -> FluxResult<Vec<u8>> {
+fn compress_multi(values: &[&[u8]], profile: CompressionProfile) -> FluxResult<Vec<u8>> {
     compress_multi_impl(values, profile, SUB_BLOCK_ROWS)
 }
 
@@ -996,8 +1005,10 @@ fn collect_fsst_sample<'a>(values: &'a [&'a [u8]]) -> Vec<&'a [u8]> {
     let stride = (values.len() / FSST_TRAIN_SAMPLE_STRINGS).max(1);
     let mut bytes = 0usize;
     let mut i = 0;
-    while i < values.len() && sample.len() < FSST_TRAIN_SAMPLE_STRINGS
-        && bytes < FSST_TRAIN_SAMPLE_BYTES {
+    while i < values.len()
+        && sample.len() < FSST_TRAIN_SAMPLE_STRINGS
+        && bytes < FSST_TRAIN_SAMPLE_BYTES
+    {
         sample.push(values[i]);
         bytes += values[i].len();
         i += stride;
@@ -1073,24 +1084,19 @@ fn compress_fsst(
 
     let offsets_block = compress_index_column(&offsets, profile)?;
     let (cd, sub) = match profile {
-        CompressionProfile::Brotli => (
-            brotli_compress(data_buf.as_slice())?,
-            SUB_FSST_BROTLI,
-        ),
+        CompressionProfile::Brotli => (brotli_compress(data_buf.as_slice())?, SUB_FSST_BROTLI),
         CompressionProfile::Archive => (
             zstd::stream::encode_all(data_buf.as_slice(), ZSTD_STRING_LEVEL)
                 .map_err(|e| FluxError::Internal(format!("zstd fsst data: {e}")))?,
             SUB_FSST_ZSTD,
         ),
-        _ => (
-            lz4_flex::compress_prepend_size(&data_buf),
-            SUB_FSST_LZ4,
-        ),
+        _ => (lz4_flex::compress_prepend_size(&data_buf), SUB_FSST_LZ4),
     };
 
     let table = serialize_fsst_table(compressor);
 
-    let mut buf = Vec::with_capacity(1 + 1 + 4 + 2 + table.len() + 4 + offsets_block.len() + 4 + cd.len());
+    let mut buf =
+        Vec::with_capacity(1 + 1 + 4 + 2 + table.len() + 4 + offsets_block.len() + 4 + cd.len());
     buf.write_u8(TAG)?;
     buf.write_u8(sub)?;
     buf.write_u32::<LittleEndian>(values.len() as u32)?;
@@ -1123,7 +1129,8 @@ fn compress_raw_with_dict(values: &[&[u8]], dict: Vec<u8>) -> FluxResult<Vec<u8>
     let offsets_block = compress_index_column(&offsets, CompressionProfile::Archive)?;
     let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, &dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
-    let cd = c.compress(&data_buf)
+    let cd = c
+        .compress(&data_buf)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
 
     let mut buf = Vec::new();
@@ -1166,7 +1173,8 @@ fn compress_fsst_with_dict(
     let offsets_block = compress_index_column(&offsets, CompressionProfile::Archive)?;
     let mut c = zstd::bulk::Compressor::with_dictionary(ZSTD_STRING_LEVEL, &dict)
         .map_err(|e| FluxError::Internal(format!("zstd dict enc: {e}")))?;
-    let cd = c.compress(&data_buf)
+    let cd = c
+        .compress(&data_buf)
         .map_err(|e| FluxError::Internal(format!("zstd dict compress: {e}")))?;
 
     let table = serialize_fsst_table(compressor);
@@ -1204,19 +1212,13 @@ fn compress_raw(values: &[&[u8]], profile: CompressionProfile) -> FluxResult<Vec
     let offsets_block = compress_index_column(&offsets, profile)?;
 
     let (cd, sub) = match profile {
-        CompressionProfile::Brotli => (
-            brotli_compress(data_buf.as_slice())?,
-            SUB_RAW_BROTLI,
-        ),
+        CompressionProfile::Brotli => (brotli_compress(data_buf.as_slice())?, SUB_RAW_BROTLI),
         CompressionProfile::Archive => (
             zstd::stream::encode_all(data_buf.as_slice(), ZSTD_STRING_LEVEL)
                 .map_err(|e| FluxError::Internal(format!("zstd data: {e}")))?,
             SUB_RAW_ZSTD,
         ),
-        _ => (
-            lz4_flex::compress_prepend_size(&data_buf),
-            SUB_RAW_LZ4,
-        ),
+        _ => (lz4_flex::compress_prepend_size(&data_buf), SUB_RAW_LZ4),
     };
 
     let mut buf = Vec::new();
@@ -1254,17 +1256,17 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<Vec<u8>>, usize)> {
 
     match sub_strategy {
         SUB_DICT => decompress_dict(&mut cur, string_count),
-        SUB_RAW_LZ4_LEGACY  => decompress_raw_legacy(&mut cur, string_count, false),
+        SUB_RAW_LZ4_LEGACY => decompress_raw_legacy(&mut cur, string_count, false),
         SUB_RAW_ZSTD_LEGACY => decompress_raw_legacy(&mut cur, string_count, true),
-        SUB_RAW_LZ4    => decompress_raw_v2(&mut cur, string_count, false),
-        SUB_RAW_ZSTD   => decompress_raw_v2(&mut cur, string_count, true),
+        SUB_RAW_LZ4 => decompress_raw_v2(&mut cur, string_count, false),
+        SUB_RAW_ZSTD => decompress_raw_v2(&mut cur, string_count, true),
         SUB_RAW_BROTLI => decompress_raw_brotli(&mut cur, string_count),
-        SUB_FSST_LZ4    => decompress_fsst(&mut cur, string_count, false),
-        SUB_FSST_ZSTD   => decompress_fsst(&mut cur, string_count, true),
+        SUB_FSST_LZ4 => decompress_fsst(&mut cur, string_count, false),
+        SUB_FSST_ZSTD => decompress_fsst(&mut cur, string_count, true),
         SUB_FSST_BROTLI => decompress_fsst_brotli(&mut cur, string_count),
-        SUB_RAW_ZSTD_DICT  => decompress_raw_zstd_dict(&mut cur, string_count),
+        SUB_RAW_ZSTD_DICT => decompress_raw_zstd_dict(&mut cur, string_count),
         SUB_FSST_ZSTD_DICT => decompress_fsst_zstd_dict(&mut cur, string_count),
-        SUB_FRONT_CODED    => decompress_front_coded(&mut cur, string_count),
+        SUB_FRONT_CODED => decompress_front_coded(&mut cur, string_count),
         SUB_MULTI => decompress_multi(data, &mut cur, string_count),
         _ => Err(FluxError::InvalidFile(format!(
             "unknown string sub_strategy: {sub_strategy:#04x}"
@@ -1325,7 +1327,10 @@ fn decompress_dict(cur: &mut Cursor<&[u8]>, count: usize) -> FluxResult<(Vec<Vec
         let pos = cur.position() as usize;
         let data = cur.get_ref();
         if pos + len > data.len() {
-            return Err(FluxError::BufferOverflow { needed: pos + len, have: data.len() });
+            return Err(FluxError::BufferOverflow {
+                needed: pos + len,
+                have: data.len(),
+            });
         }
         dict.push(data[pos..pos + len].to_vec());
         cur.set_position((pos + len) as u64);
@@ -1420,7 +1425,8 @@ fn decompress_raw_v2(
     if offsets.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
             "string raw_v2 offsets length {} != count+1 {}",
-            offsets.len(), count + 1,
+            offsets.len(),
+            count + 1,
         )));
     }
     let mut strings = Vec::with_capacity(count);
@@ -1542,7 +1548,8 @@ fn decompress_raw_brotli(
 ) -> FluxResult<(Vec<Vec<u8>>, usize)> {
     let off_len = cur.read_u32::<LittleEndian>()? as usize;
     let off_start = cur.position() as usize;
-    let offsets = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    let offsets =
+        decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
     cur.set_position((off_start + off_len) as u64);
 
     let cd_len = cur.read_u32::<LittleEndian>()? as usize;
@@ -1551,7 +1558,9 @@ fn decompress_raw_brotli(
 
     if offsets.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "raw_brotli offsets length {} != count+1 {}", offsets.len(), count + 1,
+            "raw_brotli offsets length {} != count+1 {}",
+            offsets.len(),
+            count + 1,
         )));
     }
     let mut strings = Vec::with_capacity(count);
@@ -1559,7 +1568,9 @@ fn decompress_raw_brotli(
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
         if e > data_buf.len() || s > e {
-            return Err(FluxError::InvalidFile("raw_brotli offsets out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "raw_brotli offsets out of range".into(),
+            ));
         }
         strings.push(data_buf[s..e].to_vec());
     }
@@ -1576,12 +1587,14 @@ fn decompress_fsst_brotli(
     // Actually we need a custom path since decode_fsst_buffers is LZ4/Zstd only.
     let table_len = cur.read_u16::<LittleEndian>()? as usize;
     let table_start = cur.position() as usize;
-    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    let (compressor, _) =
+        deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
     cur.set_position((table_start + table_len) as u64);
 
     let off_len = cur.read_u32::<LittleEndian>()? as usize;
     let off_start = cur.position() as usize;
-    let offsets = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    let offsets =
+        decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
     cur.set_position((off_start + off_len) as u64);
 
     let cd_len = cur.read_u32::<LittleEndian>()? as usize;
@@ -1590,7 +1603,9 @@ fn decompress_fsst_brotli(
 
     if offsets.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "fsst_brotli offsets length {} != count+1 {}", offsets.len(), count + 1,
+            "fsst_brotli offsets length {} != count+1 {}",
+            offsets.len(),
+            count + 1,
         )));
     }
     let decompressor = compressor.decompressor();
@@ -1599,7 +1614,9 @@ fn decompress_fsst_brotli(
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
         if e > code_bytes.len() || s > e {
-            return Err(FluxError::InvalidFile("fsst_brotli offsets out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "fsst_brotli offsets out of range".into(),
+            ));
         }
         strings.push(decompressor.decompress(&code_bytes[s..e]));
     }
@@ -1607,13 +1624,11 @@ fn decompress_fsst_brotli(
 }
 
 /// Direct-to-Arrow: Raw + Brotli.
-fn decompress_raw_brotli_to_arrow(
-    cur: &mut Cursor<&[u8]>,
-    count: usize,
-) -> FluxResult<ArrayRef> {
+fn decompress_raw_brotli_to_arrow(cur: &mut Cursor<&[u8]>, count: usize) -> FluxResult<ArrayRef> {
     let off_len = cur.read_u32::<LittleEndian>()? as usize;
     let off_start = cur.position() as usize;
-    let offsets_u64 = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    let offsets_u64 =
+        decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
     cur.set_position((off_start + off_len) as u64);
 
     let cd_len = cur.read_u32::<LittleEndian>()? as usize;
@@ -1622,7 +1637,9 @@ fn decompress_raw_brotli_to_arrow(
 
     if offsets_u64.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "raw_brotli to_arrow offsets length {} != count+1 {}", offsets_u64.len(), count + 1,
+            "raw_brotli to_arrow offsets length {} != count+1 {}",
+            offsets_u64.len(),
+            count + 1,
         )));
     }
     let offsets_i32: Vec<i32> = offsets_u64.iter().map(|&o| o as i32).collect();
@@ -1633,20 +1650,19 @@ fn decompress_raw_brotli_to_arrow(
 }
 
 /// Direct-to-Arrow: FSST + Brotli.
-fn decompress_fsst_brotli_to_arrow(
-    cur: &mut Cursor<&[u8]>,
-    count: usize,
-) -> FluxResult<ArrayRef> {
+fn decompress_fsst_brotli_to_arrow(cur: &mut Cursor<&[u8]>, count: usize) -> FluxResult<ArrayRef> {
     use rayon::prelude::*;
 
     let table_len = cur.read_u16::<LittleEndian>()? as usize;
     let table_start = cur.position() as usize;
-    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    let (compressor, _) =
+        deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
     cur.set_position((table_start + table_len) as u64);
 
     let off_len = cur.read_u32::<LittleEndian>()? as usize;
     let off_start = cur.position() as usize;
-    let offsets_u64 = decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
+    let offsets_u64 =
+        decompress_index_column(&cur.get_ref()[off_start..off_start + off_len], count + 1)?;
     cur.set_position((off_start + off_len) as u64);
 
     let cd_len = cur.read_u32::<LittleEndian>()? as usize;
@@ -1655,24 +1671,31 @@ fn decompress_fsst_brotli_to_arrow(
 
     if offsets_u64.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "fsst_brotli to_arrow offsets length {} != count+1 {}", offsets_u64.len(), count + 1,
+            "fsst_brotli to_arrow offsets length {} != count+1 {}",
+            offsets_u64.len(),
+            count + 1,
         )));
     }
 
     let decompressor = compressor.decompressor();
     const FSST_DEC_PAR_THRESHOLD: usize = 8192;
     let decoded: Vec<Vec<u8>> = if count >= FSST_DEC_PAR_THRESHOLD {
-        (0..count).into_par_iter().map(|i| {
-            let s = offsets_u64[i] as usize;
-            let e = offsets_u64[i + 1] as usize;
-            decompressor.decompress(&code_bytes[s..e])
-        }).collect()
+        (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let s = offsets_u64[i] as usize;
+                let e = offsets_u64[i + 1] as usize;
+                decompressor.decompress(&code_bytes[s..e])
+            })
+            .collect()
     } else {
-        (0..count).map(|i| {
-            let s = offsets_u64[i] as usize;
-            let e = offsets_u64[i + 1] as usize;
-            decompressor.decompress(&code_bytes[s..e])
-        }).collect()
+        (0..count)
+            .map(|i| {
+                let s = offsets_u64[i] as usize;
+                let e = offsets_u64[i + 1] as usize;
+                decompressor.decompress(&code_bytes[s..e])
+            })
+            .collect()
     };
 
     let total: usize = decoded.iter().map(|v| v.len()).sum();
@@ -1708,7 +1731,9 @@ fn decompress_raw_zstd_dict(
 
     if offsets.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "raw_zstd_dict offsets length {} != count+1 {}", offsets.len(), count + 1,
+            "raw_zstd_dict offsets length {} != count+1 {}",
+            offsets.len(),
+            count + 1,
         )));
     }
     let mut strings = Vec::with_capacity(count);
@@ -1716,7 +1741,9 @@ fn decompress_raw_zstd_dict(
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
         if e > data_buf.len() || s > e {
-            return Err(FluxError::InvalidFile("raw_zstd_dict offsets out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "raw_zstd_dict offsets out of range".into(),
+            ));
         }
         strings.push(data_buf[s..e].to_vec());
     }
@@ -1730,7 +1757,8 @@ fn decompress_fsst_zstd_dict(
 ) -> FluxResult<(Vec<Vec<u8>>, usize)> {
     let table_len = cur.read_u16::<LittleEndian>()? as usize;
     let table_start = cur.position() as usize;
-    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    let (compressor, _) =
+        deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
     cur.set_position((table_start + table_len) as u64);
 
     let dict = read_zstd_dict(cur)?.to_vec();
@@ -1751,7 +1779,9 @@ fn decompress_fsst_zstd_dict(
         let s = offsets[i] as usize;
         let e = offsets[i + 1] as usize;
         if e > code_bytes.len() || s > e {
-            return Err(FluxError::InvalidFile("fsst_zstd_dict offsets out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "fsst_zstd_dict offsets out of range".into(),
+            ));
         }
         strings.push(decompressor.decompress(&code_bytes[s..e]));
     }
@@ -1790,7 +1820,8 @@ fn decompress_fsst_zstd_dict_to_arrow(
 
     let table_len = cur.read_u16::<LittleEndian>()? as usize;
     let table_start = cur.position() as usize;
-    let (compressor, _) = deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
+    let (compressor, _) =
+        deserialize_fsst_table(&cur.get_ref()[table_start..table_start + table_len])?;
     cur.set_position((table_start + table_len) as u64);
 
     let dict = read_zstd_dict(cur)?.to_vec();
@@ -1808,17 +1839,22 @@ fn decompress_fsst_zstd_dict_to_arrow(
     let decompressor = compressor.decompressor();
     const FSST_DEC_PAR_THRESHOLD: usize = 8192;
     let decoded: Vec<Vec<u8>> = if count >= FSST_DEC_PAR_THRESHOLD {
-        (0..count).into_par_iter().map(|i| {
-            let s = offsets[i] as usize;
-            let e = offsets[i + 1] as usize;
-            decompressor.decompress(&code_bytes[s..e])
-        }).collect()
+        (0..count)
+            .into_par_iter()
+            .map(|i| {
+                let s = offsets[i] as usize;
+                let e = offsets[i + 1] as usize;
+                decompressor.decompress(&code_bytes[s..e])
+            })
+            .collect()
     } else {
-        (0..count).map(|i| {
-            let s = offsets[i] as usize;
-            let e = offsets[i + 1] as usize;
-            decompressor.decompress(&code_bytes[s..e])
-        }).collect()
+        (0..count)
+            .map(|i| {
+                let s = offsets[i] as usize;
+                let e = offsets[i + 1] as usize;
+                decompressor.decompress(&code_bytes[s..e])
+            })
+            .collect()
     };
 
     let total: usize = decoded.iter().map(|v| v.len()).sum();
@@ -1837,10 +1873,7 @@ fn decompress_fsst_zstd_dict_to_arrow(
 
 /// Direct-to-Arrow front-coded decode. Builds the offsets + data buffers
 /// while reconstructing; avoids the intermediate `Vec<Vec<u8>>`.
-fn decompress_front_coded_to_arrow(
-    cur: &mut Cursor<&[u8]>,
-    count: usize,
-) -> FluxResult<ArrayRef> {
+fn decompress_front_coded_to_arrow(cur: &mut Cursor<&[u8]>, count: usize) -> FluxResult<ArrayRef> {
     let codec = cur.read_u8()?;
     let payload_len = cur.read_u32::<LittleEndian>()? as usize;
     let payload_start = cur.position() as usize;
@@ -1851,7 +1884,11 @@ fn decompress_front_coded_to_arrow(
         2 => zstd::stream::decode_all(compressed)
             .map_err(|e| FluxError::Internal(format!("zstd front-coded: {e}")))?,
         3 => brotli_decompress(compressed)?,
-        _ => return Err(FluxError::InvalidFile(format!("front-coded: bad codec {codec}"))),
+        _ => {
+            return Err(FluxError::InvalidFile(format!(
+                "front-coded: bad codec {codec}"
+            )));
+        }
     };
 
     let mut offsets: Vec<i32> = Vec::with_capacity(count + 1);
@@ -1864,7 +1901,9 @@ fn decompress_front_coded_to_arrow(
         let shared = shared as usize;
         let slen = slen as usize;
         if np + slen > decoded.len() {
-            return Err(FluxError::InvalidFile("front-coded: suffix out of range".into()));
+            return Err(FluxError::InvalidFile(
+                "front-coded: suffix out of range".into(),
+            ));
         }
 
         // Previous row (if any) lives in data_buf between the last two
@@ -1946,11 +1985,12 @@ fn decompress_fsst(
     count: usize,
     use_zstd: bool,
 ) -> FluxResult<(Vec<Vec<u8>>, usize)> {
-    let (compressor, offsets, code_bytes, end) =
-        decode_fsst_buffers(cur, use_zstd, count + 1)?;
+    let (compressor, offsets, code_bytes, end) = decode_fsst_buffers(cur, use_zstd, count + 1)?;
     if offsets.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "fsst offsets length {} != count+1 {}", offsets.len(), count + 1,
+            "fsst offsets length {} != count+1 {}",
+            offsets.len(),
+            count + 1,
         )));
     }
     let decompressor = compressor.decompressor();
@@ -2018,17 +2058,17 @@ pub fn decompress_to_arrow_string_for_column(
 
     let arr = match sub_strategy {
         SUB_DICT => decompress_dict_to_arrow(&mut cur, string_count),
-        SUB_RAW_LZ4_LEGACY  => decompress_raw_legacy_to_arrow(&mut cur, string_count, false),
+        SUB_RAW_LZ4_LEGACY => decompress_raw_legacy_to_arrow(&mut cur, string_count, false),
         SUB_RAW_ZSTD_LEGACY => decompress_raw_legacy_to_arrow(&mut cur, string_count, true),
-        SUB_RAW_LZ4    => decompress_raw_v2_to_arrow(&mut cur, string_count, false),
-        SUB_RAW_ZSTD   => decompress_raw_v2_to_arrow(&mut cur, string_count, true),
+        SUB_RAW_LZ4 => decompress_raw_v2_to_arrow(&mut cur, string_count, false),
+        SUB_RAW_ZSTD => decompress_raw_v2_to_arrow(&mut cur, string_count, true),
         SUB_RAW_BROTLI => decompress_raw_brotli_to_arrow(&mut cur, string_count),
-        SUB_FSST_LZ4    => decompress_fsst_to_arrow(&mut cur, string_count, false),
-        SUB_FSST_ZSTD   => decompress_fsst_to_arrow(&mut cur, string_count, true),
+        SUB_FSST_LZ4 => decompress_fsst_to_arrow(&mut cur, string_count, false),
+        SUB_FSST_ZSTD => decompress_fsst_to_arrow(&mut cur, string_count, true),
         SUB_FSST_BROTLI => decompress_fsst_brotli_to_arrow(&mut cur, string_count),
-        SUB_RAW_ZSTD_DICT  => decompress_raw_zstd_dict_to_arrow(&mut cur, string_count),
+        SUB_RAW_ZSTD_DICT => decompress_raw_zstd_dict_to_arrow(&mut cur, string_count),
         SUB_FSST_ZSTD_DICT => decompress_fsst_zstd_dict_to_arrow(&mut cur, string_count),
-        SUB_FRONT_CODED    => decompress_front_coded_to_arrow(&mut cur, string_count),
+        SUB_FRONT_CODED => decompress_front_coded_to_arrow(&mut cur, string_count),
         SUB_MULTI => decompress_multi_to_arrow(data, &mut cur, string_count, dtype_tag),
         _ => Err(FluxError::InvalidFile(format!(
             "unknown string sub_strategy: {sub_strategy:#04x}"
@@ -2038,8 +2078,7 @@ pub fn decompress_to_arrow_string_for_column(
     // The internal helpers always produce StringArray (Utf8 / i32 offsets).
     // Cast to LargeStringArray when the original column was LargeUtf8.
     if matches!(dtype_tag, FluxDType::LargeUtf8) {
-        arrow::compute::cast(&*arr, &arrow_schema::DataType::LargeUtf8)
-            .map_err(FluxError::Arrow)
+        arrow::compute::cast(&*arr, &arrow_schema::DataType::LargeUtf8).map_err(FluxError::Arrow)
     } else {
         Ok(arr)
     }
@@ -2054,7 +2093,10 @@ fn decompress_dict_to_arrow(cur: &mut Cursor<&[u8]>, count: usize) -> FluxResult
         let pos = cur.position() as usize;
         let data = cur.get_ref();
         if pos + len > data.len() {
-            return Err(FluxError::BufferOverflow { needed: pos + len, have: data.len() });
+            return Err(FluxError::BufferOverflow {
+                needed: pos + len,
+                have: data.len(),
+            });
         }
         dict.push(data[pos..pos + len].to_vec());
         cur.set_position((pos + len) as u64);
@@ -2135,7 +2177,8 @@ fn decompress_raw_v2_to_arrow(
     if offsets_u64.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
             "string raw_v2 offsets length {} != count+1 {}",
-            offsets_u64.len(), count + 1,
+            offsets_u64.len(),
+            count + 1,
         )));
     }
     // The data column has i32 offsets on the Arrow side; our compression
@@ -2174,7 +2217,9 @@ fn decompress_fsst_to_arrow(
         decode_fsst_buffers(cur, use_zstd, count + 1)?;
     if offsets_u64.len() != count + 1 {
         return Err(FluxError::InvalidFile(format!(
-            "fsst offsets length {} != count+1 {}", offsets_u64.len(), count + 1,
+            "fsst offsets length {} != count+1 {}",
+            offsets_u64.len(),
+            count + 1,
         )));
     }
 
@@ -2265,7 +2310,9 @@ fn extract_strings(array: &dyn Array) -> FluxResult<Vec<&[u8]>> {
             let a = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
             Ok((0..a.len()).map(|i| a.value(i)).collect())
         }
-        dt => Err(FluxError::Internal(format!("string_compressor: unsupported {dt}"))),
+        dt => Err(FluxError::Internal(format!(
+            "string_compressor: unsupported {dt}"
+        ))),
     }
 }
 
@@ -2298,7 +2345,9 @@ mod tests {
         assert_eq!(block[1], SUB_DICT);
         let (decoded, _) = decompress(&block).unwrap();
         assert_eq!(decoded.len(), 2000);
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     /// Produce a deterministic pseudo-shuffled index for tests that need
@@ -2307,7 +2356,9 @@ mod tests {
         let mut s: u64 = 0x123456789ABCDEF0;
         let mut out: Vec<usize> = (0..n).collect();
         for i in (1..n).rev() {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
             let j = (s as usize) % (i + 1);
             out.swap(i, j);
         }
@@ -2325,7 +2376,9 @@ mod tests {
         assert_eq!(block[1], SUB_RAW_LZ4);
         let (decoded, _) = decompress(&block).unwrap();
         assert_eq!(decoded.len(), 500);
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2338,7 +2391,9 @@ mod tests {
         // Small column below FSST_MIN_BYTES → raw Zstd v2 path.
         assert_eq!(block[1], SUB_RAW_ZSTD);
         let (decoded, _) = decompress(&block).unwrap();
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2353,20 +2408,32 @@ mod tests {
         // `*` would panic. We only need a deterministic pseudo-random
         // 64-bit session id per row, so wrapping arithmetic is the
         // intended semantics.
-        let base: Vec<String> = (0..20_000).map(|i| {
-            let session = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            format!("https://api.example.com/v1/users/{i}?session={session:016x}")
-        }).collect();
+        let base: Vec<String> = (0..20_000)
+            .map(|i| {
+                let session = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                format!("https://api.example.com/v1/users/{i}?session={session:016x}")
+            })
+            .collect();
         let idx = scrambled_indices(base.len());
         let strings: Vec<String> = idx.iter().map(|&i| base[i].clone()).collect();
         let values: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
         let raw_bytes: usize = values.iter().map(|v| v.len()).sum();
         let block = compress_strings_with_profile(&values, CompressionProfile::Speed).unwrap();
-        assert_eq!(block[1], SUB_FSST_LZ4, "expected FSST sub-strategy for high-card URL corpus");
-        assert!(block.len() < raw_bytes / 2, "expected >2x shrink, got {} → {}", raw_bytes, block.len());
+        assert_eq!(
+            block[1], SUB_FSST_LZ4,
+            "expected FSST sub-strategy for high-card URL corpus"
+        );
+        assert!(
+            block.len() < raw_bytes / 2,
+            "expected >2x shrink, got {} → {}",
+            raw_bytes,
+            block.len()
+        );
         let (decoded, _) = decompress(&block).unwrap();
         assert_eq!(decoded.len(), values.len());
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2376,20 +2443,34 @@ mod tests {
         // can assert the direct sub-strategy tag.
         let rows = 500_000usize;
         let strings: Vec<String> = (0..rows)
-            .map(|i| format!("/var/log/app/{:04}/{:02}/{:02}/worker-{:05}.log",
-                2020 + (i / 200_000) as u32,
-                1 + ((i / 20_000) % 12) as u32,
-                1 + ((i / 1_000) % 28) as u32,
-                i))
+            .map(|i| {
+                format!(
+                    "/var/log/app/{:04}/{:02}/{:02}/worker-{:05}.log",
+                    2020 + (i / 200_000) as u32,
+                    1 + ((i / 20_000) % 12) as u32,
+                    1 + ((i / 1_000) % 28) as u32,
+                    i
+                )
+            })
             .collect();
         let values: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
         let raw_bytes: usize = values.iter().map(|v| v.len()).sum();
         let block = compress_strings_with_profile(&values, CompressionProfile::Speed).unwrap();
-        assert_eq!(block[1], SUB_FRONT_CODED, "expected front-coded for sorted paths");
-        assert!(block.len() * 4 < raw_bytes, "expected >4x shrink, got {} → {}", raw_bytes, block.len());
+        assert_eq!(
+            block[1], SUB_FRONT_CODED,
+            "expected front-coded for sorted paths"
+        );
+        assert!(
+            block.len() * 4 < raw_bytes,
+            "expected >4x shrink, got {} → {}",
+            raw_bytes,
+            block.len()
+        );
         let (decoded, _) = decompress(&block).unwrap();
         assert_eq!(decoded.len(), rows);
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2397,21 +2478,37 @@ mod tests {
         // Large enough to trigger SUB_MULTI (>1M rows).
         let rows = 1_100_000usize;
         let strings: Vec<String> = (0..rows)
-            .map(|i| format!("row_{i:09}_payload_{:016x}", (i as u64).wrapping_mul(0x9E37_79B9)))
+            .map(|i| {
+                format!(
+                    "row_{i:09}_payload_{:016x}",
+                    (i as u64).wrapping_mul(0x9E37_79B9)
+                )
+            })
             .collect();
         let values: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
         let block = compress_strings_with_profile(&values, CompressionProfile::Speed).unwrap();
-        assert_eq!(block[1], SUB_MULTI, "expected SUB_MULTI container for 1.1M rows");
+        assert_eq!(
+            block[1], SUB_MULTI,
+            "expected SUB_MULTI container for 1.1M rows"
+        );
         let (decoded, _) = decompress(&block).unwrap();
         assert_eq!(decoded.len(), rows);
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
     fn fsst_zstd_round_trip() {
-        let base: Vec<String> = (0..20_000).map(|i| {
-            format!("https://api.example.com/v2/orders/{}?ts={}", i, 1_700_000_000u64 + i as u64)
-        }).collect();
+        let base: Vec<String> = (0..20_000)
+            .map(|i| {
+                format!(
+                    "https://api.example.com/v2/orders/{}?ts={}",
+                    i,
+                    1_700_000_000u64 + i as u64
+                )
+            })
+            .collect();
         let idx = scrambled_indices(base.len());
         let strings: Vec<String> = idx.iter().map(|&i| base[i].clone()).collect();
         let values: Vec<&[u8]> = strings.iter().map(|s| s.as_bytes()).collect();
@@ -2424,7 +2521,9 @@ mod tests {
               || x == SUB_RAW_ZSTD_DICT
               || x == SUB_FSST_ZSTD_DICT));
         let (decoded, _) = decompress(&block).unwrap();
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2441,14 +2540,20 @@ mod tests {
         // Rotate the index via xorshift so neighbouring rows aren't monotone
         // (otherwise front-coding wins and `SUB_DICT` isn't taken).
         let mut s: u64 = 0xFEEDF00DBAADBEEF;
-        let values: Vec<&[u8]> = (0..1000).map(|_| {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
-            strings[(s as usize) % 200].as_bytes()
-        }).collect();
+        let values: Vec<&[u8]> = (0..1000)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                strings[(s as usize) % 200].as_bytes()
+            })
+            .collect();
         let block = compress_strings_with_profile(&values, CompressionProfile::Speed).unwrap();
         assert_eq!(block[1], SUB_DICT, "20% cardinality should use dict");
         let (decoded, _) = decompress(&block).unwrap();
-        for (i, d) in decoded.iter().enumerate() { assert_eq!(d.as_slice(), values[i]); }
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!(d.as_slice(), values[i]);
+        }
     }
 
     #[test]
@@ -2467,12 +2572,18 @@ mod tests {
     fn cross_column_group_round_trip_and_smaller() {
         // Two URL columns that SHARE vocabulary (same host prefix) should
         // compress smaller as one group than as two independent blocks.
-        let a: Vec<String> = (0..30_000).map(|i| {
-            format!("https://api.example.com/v1/users/{}?x={:04x}", i, i as u16)
-        }).collect();
-        let b: Vec<String> = (0..30_000).map(|i| {
-            format!("https://api.example.com/v1/users/{}?y={:04x}", i * 3, (i * 7) as u16)
-        }).collect();
+        let a: Vec<String> = (0..30_000)
+            .map(|i| format!("https://api.example.com/v1/users/{}?x={:04x}", i, i as u16))
+            .collect();
+        let b: Vec<String> = (0..30_000)
+            .map(|i| {
+                format!(
+                    "https://api.example.com/v1/users/{}?y={:04x}",
+                    i * 3,
+                    (i * 7) as u16
+                )
+            })
+            .collect();
         let a_arr = StringArray::from(a.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let b_arr = StringArray::from(b.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
@@ -2491,7 +2602,8 @@ mod tests {
         let grouped = compress_cross_column_group_with_profile(
             &[(10, &a_arr as &dyn Array), (11, &b_arr as &dyn Array)],
             CompressionProfile::Speed,
-        ).unwrap();
+        )
+        .unwrap();
 
         // On tiny test data each column hits FSST independently so the
         // grouped variant can be slightly larger (extra header + inner
@@ -2499,9 +2611,12 @@ mod tests {
         // workloads and columns that share sparse vocabulary. What MUST
         // hold: the grouped block round-trips correctly and isn't
         // egregiously larger (within ~2× independent sum).
-        assert!(grouped.len() < independent_sum * 2,
+        assert!(
+            grouped.len() < independent_sum * 2,
             "grouped ({}) should not exceed 2× independent sum ({})",
-            grouped.len(), independent_sum);
+            grouped.len(),
+            independent_sum
+        );
 
         // Round-trip: decompress back into two columns matching the originals.
         let parts = decompress_cross_column_group(&grouped, FluxDType::Utf8).unwrap();
@@ -2512,7 +2627,11 @@ mod tests {
         let rb = parts[1].1.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(ra.len(), a_arr.len());
         assert_eq!(rb.len(), b_arr.len());
-        for i in 0..ra.len() { assert_eq!(ra.value(i), a_arr.value(i)); }
-        for i in 0..rb.len() { assert_eq!(rb.value(i), b_arr.value(i)); }
+        for i in 0..ra.len() {
+            assert_eq!(ra.value(i), a_arr.value(i));
+        }
+        for i in 0..rb.len() {
+            assert_eq!(rb.value(i), b_arr.value(i));
+        }
     }
 }

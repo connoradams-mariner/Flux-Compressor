@@ -74,19 +74,23 @@ pub fn cmd_float_compare_bench(rows: usize) -> Result<()> {
 
 fn cmd_compare_bench_with_schema(rows: usize, variant: CompareSchema) -> Result<()> {
     let title = match variant {
-        CompareSchema::Mixed       => "Mixed 22-col",
+        CompareSchema::Mixed => "Mixed 22-col",
         CompareSchema::StringHeavy => "String-heavy (10 string + 2 id + 1 ts)",
-        CompareSchema::FloatHeavy  => "Float-heavy (10 float + 2 id + 1 ts)",
+        CompareSchema::FloatHeavy => "Float-heavy (10 float + 2 id + 1 ts)",
     };
     println!("╔═══════════════════════════════════════════════════════════════════════╗");
-    println!("║  Flux vs Parquet vs Delta Lake — {} ({})", title, fmt_rows(rows));
+    println!(
+        "║  Flux vs Parquet vs Delta Lake — {} ({})",
+        title,
+        fmt_rows(rows)
+    );
     println!("╚═══════════════════════════════════════════════════════════════════════╝");
 
     // Build the shared dataset.
     let batch = match variant {
-        CompareSchema::Mixed       => mixed_bench::build_batch_for_compare(rows),
+        CompareSchema::Mixed => mixed_bench::build_batch_for_compare(rows),
         CompareSchema::StringHeavy => mixed_bench::build_string_heavy_batch(rows),
-        CompareSchema::FloatHeavy  => mixed_bench::build_float_heavy_batch(rows),
+        CompareSchema::FloatHeavy => mixed_bench::build_float_heavy_batch(rows),
     };
     let arrow_bytes = mixed_bench::estimate_arrow_bytes_for_compare(&batch);
     println!("  Rows:  {}", fmt_rows(rows));
@@ -162,16 +166,40 @@ fn cmd_compare_bench_with_schema(rows: usize, variant: CompareSchema) -> Result<
     let delta_dec_ms = t4.elapsed().as_secs_f64() * 1000.0;
 
     // ── Report ───────────────────────────────────────────────────────────
-    println!("  {:<22} {:>12} {:>8} {:>12} {:>12}",
-        "Codec", "Size", "Ratio", "Comp MB/s", "Dec MB/s");
+    println!(
+        "  {:<22} {:>12} {:>8} {:>12} {:>12}",
+        "Codec", "Size", "Ratio", "Comp MB/s", "Dec MB/s"
+    );
     println!("  {}", "─".repeat(72));
-    print_row("Flux (Archive)",   flux_bytes.len(), arrow_bytes, flux_comp_ms, flux_dec_ms);
-    print_row("Parquet (zstd-3)", pq_size,          arrow_bytes, pq_comp_ms,   pq_dec_ms);
-    print_row("Delta Lake (zstd-3)", delta_size,    arrow_bytes, pq_comp_ms,   delta_dec_ms);
+    print_row(
+        "Flux (Archive)",
+        flux_bytes.len(),
+        arrow_bytes,
+        flux_comp_ms,
+        flux_dec_ms,
+    );
+    print_row(
+        "Parquet (zstd-3)",
+        pq_size,
+        arrow_bytes,
+        pq_comp_ms,
+        pq_dec_ms,
+    );
+    print_row(
+        "Delta Lake (zstd-3)",
+        delta_size,
+        arrow_bytes,
+        pq_comp_ms,
+        delta_dec_ms,
+    );
 
     println!();
-    println!("  (Delta = Parquet {} + _delta_log/ {} = {})",
-        human(delta_data_size), human(delta_log_size), human(delta_size));
+    println!(
+        "  (Delta = Parquet {} + _delta_log/ {} = {})",
+        human(delta_data_size),
+        human(delta_log_size),
+        human(delta_size)
+    );
     if flux_bytes.len() < pq_size && flux_bytes.len() < delta_size {
         println!(
             "  ✓ Flux smaller than Parquet by {} ({:.1}%) and Delta Lake by {} ({:.1}%)",
@@ -236,19 +264,19 @@ fn make_delta_log_entry(batch: &RecordBatch, data_filename: &str, size: u64) -> 
 fn spark_type_for(dt: &arrow_schema::DataType) -> String {
     use arrow_schema::DataType as D;
     match dt {
-        D::Int64 | D::UInt64     => "long".into(),
-        D::Int32 | D::UInt32     => "integer".into(),
-        D::Int16 | D::UInt16     => "short".into(),
-        D::Int8  | D::UInt8      => "byte".into(),
-        D::Float32               => "float".into(),
-        D::Float64               => "double".into(),
-        D::Boolean               => "boolean".into(),
-        D::Utf8 | D::LargeUtf8   => "string".into(),
+        D::Int64 | D::UInt64 => "long".into(),
+        D::Int32 | D::UInt32 => "integer".into(),
+        D::Int16 | D::UInt16 => "short".into(),
+        D::Int8 | D::UInt8 => "byte".into(),
+        D::Float32 => "float".into(),
+        D::Float64 => "double".into(),
+        D::Boolean => "boolean".into(),
+        D::Utf8 | D::LargeUtf8 => "string".into(),
         D::Binary | D::LargeBinary => "binary".into(),
-        D::Date32 | D::Date64    => "date".into(),
-        D::Timestamp(_, _)       => "timestamp".into(),
-        D::Decimal128(p, s)      => format!("decimal({p},{s})"),
-        _                        => "string".into(),
+        D::Date32 | D::Date64 => "date".into(),
+        D::Timestamp(_, _) => "timestamp".into(),
+        D::Decimal128(p, s) => format!("decimal({p},{s})"),
+        _ => "string".into(),
     }
 }
 
@@ -256,27 +284,43 @@ fn spark_type_for(dt: &arrow_schema::DataType) -> String {
 
 fn print_row(name: &str, size: usize, arrow_bytes: usize, c_ms: f64, d_ms: f64) {
     let ratio = arrow_bytes as f64 / size as f64;
-    println!("  {:<22} {:>12} {:>7.2}x {:>11.0} {:>11.0}",
-        name, human(size), ratio,
-        mbs(arrow_bytes, c_ms), mbs(arrow_bytes, d_ms));
+    println!(
+        "  {:<22} {:>12} {:>7.2}x {:>11.0} {:>11.0}",
+        name,
+        human(size),
+        ratio,
+        mbs(arrow_bytes, c_ms),
+        mbs(arrow_bytes, d_ms)
+    );
 }
 
 fn human(n: usize) -> String {
     const K: f64 = 1024.0;
     let f = n as f64;
-    if f < K          { format!("{} B", n) }
-    else if f < K*K   { format!("{:.1} KB", f / K) }
-    else if f < K*K*K { format!("{:.1} MB", f / (K*K)) }
-    else              { format!("{:.2} GB", f / (K*K*K)) }
+    if f < K {
+        format!("{} B", n)
+    } else if f < K * K {
+        format!("{:.1} KB", f / K)
+    } else if f < K * K * K {
+        format!("{:.1} MB", f / (K * K))
+    } else {
+        format!("{:.2} GB", f / (K * K * K))
+    }
 }
 
 fn fmt_rows(n: usize) -> String {
-    if n >= 1_000_000 { format!("{}M", n / 1_000_000) }
-    else if n >= 1_000 { format!("{}K", n / 1_000) }
-    else { n.to_string() }
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn mbs(bytes: usize, ms: f64) -> f64 {
-    if ms <= 0.0 { return 0.0; }
+    if ms <= 0.0 {
+        return 0.0;
+    }
     (bytes as f64) / (1024.0 * 1024.0) / (ms / 1000.0)
 }

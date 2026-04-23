@@ -13,17 +13,17 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow_array::{RecordBatch, UInt64Array, Int64Array, Float64Array};
+use arrow_array::{Float64Array, Int64Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 
 use loom::{
+    SEGMENT_SIZE,
     atlas::AtlasFooter,
     compressors::flux_writer::FluxWriter,
     decompressors::flux_reader::FluxReader,
-    loom_classifier::{classify, LoomStrategy},
-    outlier_map::{encode_with_outlier_map, decode_with_outlier_map},
+    loom_classifier::{LoomStrategy, classify},
+    outlier_map::{decode_with_outlier_map, encode_with_outlier_map},
     traits::{LoomCompressor, LoomDecompressor, Predicate},
-    SEGMENT_SIZE,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,18 +32,18 @@ use loom::{
 
 fn make_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("user_id",      DataType::UInt64, false), // sequential → DeltaDelta
-        Field::new("revenue_cents",DataType::UInt64, false), // random     → BitSlab
-        Field::new("region_code",  DataType::UInt64, false), // low-card   → Dictionary
-        Field::new("session_ms",   DataType::Int64,  false), // mixed      → BitSlab
+        Field::new("user_id", DataType::UInt64, false), // sequential → DeltaDelta
+        Field::new("revenue_cents", DataType::UInt64, false), // random     → BitSlab
+        Field::new("region_code", DataType::UInt64, false), // low-card   → Dictionary
+        Field::new("session_ms", DataType::Int64, false), // mixed      → BitSlab
     ]))
 }
 
 fn make_batch(n: usize, offset: u64) -> RecordBatch {
-    let user_ids: Vec<u64>  = (offset..offset + n as u64).collect();
-    let revenues: Vec<u64>  = (0..n as u64).map(|i| (i * 37 + 99) % 99_999).collect();
-    let regions:  Vec<u64>  = (0..n as u64).map(|i| i % 8).collect();
-    let sessions: Vec<i64>  = (0..n as i64).map(|i| (i * 1_234) % 86_400_000).collect();
+    let user_ids: Vec<u64> = (offset..offset + n as u64).collect();
+    let revenues: Vec<u64> = (0..n as u64).map(|i| (i * 37 + 99) % 99_999).collect();
+    let regions: Vec<u64> = (0..n as u64).map(|i| i % 8).collect();
+    let sessions: Vec<i64> = (0..n as i64).map(|i| (i * 1_234) % 86_400_000).collect();
 
     RecordBatch::try_new(
         make_schema(),
@@ -58,9 +58,13 @@ fn make_batch(n: usize, offset: u64) -> RecordBatch {
 }
 
 fn human(bytes: usize) -> String {
-    if bytes < 1024 { format!("{bytes} B") }
-    else if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
-    else { format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0)) }
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn separator(title: &str) {
@@ -77,7 +81,11 @@ fn demo_basic_round_trip() {
     let n = 100_000usize;
     let batch = make_batch(n, 0);
 
-    println!("  Input : {} rows × {} columns", batch.num_rows(), batch.num_columns());
+    println!(
+        "  Input : {} rows × {} columns",
+        batch.num_rows(),
+        batch.num_columns()
+    );
     let raw_bytes = n * 4 * 8; // 4 columns × 8 bytes each
     println!("  Raw   : {}", human(raw_bytes));
 
@@ -121,8 +129,11 @@ fn demo_basic_round_trip() {
     );
 
     // Verify first column (user_id) round-tripped correctly.
-    let col = out_batch.column(0)
-        .as_any().downcast_ref::<UInt64Array>().unwrap();
+    let col = out_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
     assert_eq!(col.value(0), 0);
     assert_eq!(col.value(n - 1), (n - 1) as u64);
     println!("  ✓ Round-trip verified");
@@ -137,7 +148,7 @@ fn demo_u128_outlier_map() {
 
     // Simulate a SUM(bigint_col) result that exceeds u64::MAX.
     let mut values: Vec<u128> = (0u128..1023).map(|i| i * 1_000_000).collect();
-    values.push(u128::MAX - 42);          // one monster value
+    values.push(u128::MAX - 42); // one monster value
     values.push(u128::MAX / 3 + 99_999); // another
 
     println!("  {} values, {} outliers (> u64::MAX)", values.len(), 2);
@@ -155,18 +166,23 @@ fn demo_u128_outlier_map() {
 
     println!(
         "  Slab  : {} bytes @ {} bits/value  (covers 99th-pct range)",
-        slab.len(), width
+        slab.len(),
+        width
     );
     println!(
         "  OutlierMap: {} entries = {} bytes  (full u128 precision)",
-        om.len(), om_bytes.len()
+        om.len(),
+        om_bytes.len()
     );
 
     // Decode.
     let decoded = decode_with_outlier_map(&slab, &om_bytes, for_val, width, values.len()).unwrap();
 
     assert_eq!(decoded, values, "u128 round-trip failed");
-    println!("  ✓ u128 round-trip verified (including {:?}...)", &values[values.len()-2..]);
+    println!(
+        "  ✓ u128 round-trip verified (including {:?}...)",
+        &values[values.len() - 2..]
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,14 +193,14 @@ fn demo_predicate_pushdown() {
     separator("3. Predicate Pushdown / Z-Order Skipping");
 
     // Three separate batches → three block groups in the Atlas footer.
-    let writer  = FluxWriter::new();
+    let writer = FluxWriter::new();
     let mut all_bytes: Vec<u8> = Vec::new();
     let mut all_footer = AtlasFooter::new();
 
     for partition in 0u64..3 {
         let offset = partition * 1024;
-        let batch  = make_batch(1024, offset);
-        let bytes  = writer.compress(&batch).unwrap();
+        let batch = make_batch(1024, offset);
+        let bytes = writer.compress(&batch).unwrap();
 
         // Merge the footer, adjusting block offsets.
         let footer = AtlasFooter::from_file_tail(&bytes).unwrap();
@@ -202,7 +218,10 @@ fn demo_predicate_pushdown() {
     // Write combined footer.
     all_bytes.extend(all_footer.to_bytes().unwrap());
 
-    println!("  Written {} blocks across 3 partitions", all_footer.blocks.len());
+    println!(
+        "  Written {} blocks across 3 partitions",
+        all_footer.blocks.len()
+    );
 
     // Full scan.
     let reader = FluxReader::new("user_id");
@@ -212,12 +231,19 @@ fn demo_predicate_pushdown() {
     println!("  Full scan  : {} rows in {}µs", full.num_rows(), full_ms);
 
     // Predicate: user_id > 2000  (should skip partition 0 and most of 1).
-    let pred = Predicate::GreaterThan { column: "user_id".into(), value: 2000 };
+    let pred = Predicate::GreaterThan {
+        column: "user_id".into(),
+        value: 2000,
+    };
     let t1 = Instant::now();
     let filtered = reader.decompress(&all_bytes, &pred).unwrap();
     let filter_ms = t1.elapsed().as_micros();
 
-    let col = filtered.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+    let col = filtered
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
     let min_returned = col.values().iter().copied().min().unwrap_or(0);
 
     println!(
@@ -227,7 +253,10 @@ fn demo_predicate_pushdown() {
         full_ms / filter_ms.max(1),
         min_returned,
     );
-    assert!(min_returned >= 2048, "expected only block-3 values (≥2048), got {min_returned}");
+    assert!(
+        min_returned >= 2048,
+        "expected only block-3 values (≥2048), got {min_returned}"
+    );
     println!("  ✓ Only blocks satisfying (user_id > 2000) were decompressed");
 }
 
@@ -253,7 +282,7 @@ fn demo_strategy_override() {
     let raw_bytes = 10_000 * 8;
     for strategy in strategies {
         let writer = FluxWriter::with_strategy(strategy);
-        let bytes  = writer.compress(&batch).unwrap();
+        let bytes = writer.compress(&batch).unwrap();
         println!(
             "  {:>12?}  {:>10}  {:>11.2}×",
             strategy,
@@ -288,20 +317,28 @@ fn demo_cold_optimizer() {
 
     // Measure hot size.
     let writer = FluxWriter::new();
-    let hot_total: usize = all_parts.iter().map(|part| {
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)])),
-            vec![Arc::new(UInt64Array::from(part.iter().map(|&v| v as u64).collect::<Vec<_>>()))],
-        ).unwrap();
-        writer.compress(&batch).unwrap().len()
-    }).sum();
+    let hot_total: usize = all_parts
+        .iter()
+        .map(|part| {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("v", DataType::UInt64, false)])),
+                vec![Arc::new(UInt64Array::from(
+                    part.iter().map(|&v| v as u64).collect::<Vec<_>>(),
+                ))],
+            )
+            .unwrap();
+            writer.compress(&batch).unwrap().len()
+        })
+        .sum();
 
     // ── Pass 1: global scan ───────────────────────────────────────────────────
     let all_values: Vec<u128> = all_parts.iter().flatten().copied().collect();
     let (global_width, global_for) = discover_width(&all_values);
     println!(
         "  Pass 1: {} total values  global_width={}  global_for={}",
-        all_values.len(), global_width, global_for
+        all_values.len(),
+        global_width,
+        global_for
     );
 
     // ── Pass 2: Z-Order sort + global re-pack ─────────────────────────────────
@@ -346,7 +383,10 @@ fn demo_cold_optimizer() {
         human(cold_bytes.len()),
         (1.0 - cold_bytes.len() as f64 / hot_total as f64) * 100.0,
     );
-    println!("  ✓ Cold archive written ({} blocks, Z-Order sorted)", cold_footer.blocks.len());
+    println!(
+        "  ✓ Cold archive written ({} blocks, Z-Order sorted)",
+        cold_footer.blocks.len()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

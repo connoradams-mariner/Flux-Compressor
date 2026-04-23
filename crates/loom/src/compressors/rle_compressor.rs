@@ -10,9 +10,9 @@
 //! [run_count × (u128 value, u16 length)]
 //! ```
 
+use crate::error::{FluxError, FluxResult};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
-use crate::error::{FluxError, FluxResult};
 
 pub const TAG: u8 = 0x01;
 

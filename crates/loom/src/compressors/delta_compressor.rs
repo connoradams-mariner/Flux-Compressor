@@ -13,18 +13,20 @@
 //! [packed delta-delta bitstream]
 //! ```
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Cursor, Write};
 use crate::{
-    bit_io::{BitWriter, BitReader, bits_needed},
+    bit_io::{BitReader, BitWriter, bits_needed},
     error::{FluxError, FluxResult},
 };
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Cursor, Write};
 
 pub const TAG: u8 = 0x02;
 
 pub fn compress(values: &[u128]) -> FluxResult<Vec<u8>> {
     if values.len() < 2 {
-        return Err(FluxError::Internal("delta encoding requires ≥2 values".into()));
+        return Err(FluxError::Internal(
+            "delta encoding requires ≥2 values".into(),
+        ));
     }
 
     // Compute first-order deltas (as i128).
@@ -36,10 +38,7 @@ pub fn compress(values: &[u128]) -> FluxResult<Vec<u8>> {
     let first_delta = deltas[0];
 
     // Second-order deltas (delta of deltas).
-    let dd: Vec<i128> = deltas
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .collect();
+    let dd: Vec<i128> = deltas.windows(2).map(|w| w[1] - w[0]).collect();
 
     // Find bit-width for delta-deltas.
     let max_dd = dd.iter().map(|&d| d.unsigned_abs()).max().unwrap_or(0);

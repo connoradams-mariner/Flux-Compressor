@@ -7,17 +7,17 @@
 //! Parquet (Snappy/Zstd) and Arrow IPC (LZ4), all through Rust-native
 //! codepaths with zero Python overhead.
 
+use anyhow::Result;
 use std::fs::{self, File};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Instant;
-use anyhow::Result;
 
 use arrow::ipc::{reader::FileReader as IpcReader, writer::FileWriter as IpcWriter};
-use arrow_array::{RecordBatch, UInt64Array, Int64Array};
+use arrow_array::{Int64Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression as PqCompression;
 use parquet::file::properties::WriterProperties;
 
@@ -36,16 +36,23 @@ pub fn cmd_bench(rows: usize, pattern: &str) -> Result<()> {
     // Run single-column test.
     let batch1 = generate_single(rows, pattern);
     let raw1 = rows * 8;
-    println!("\n── Single Column ({} rows, {}, {}) ──",
-        fmt_rows(rows), pattern, human(raw1));
+    println!(
+        "\n── Single Column ({} rows, {}, {}) ──",
+        fmt_rows(rows),
+        pattern,
+        human(raw1)
+    );
     run_comparison(&batch1, raw1, pattern, "single")?;
 
     // Run multi-column test (4 cols).
     if pattern == "sequential" || pattern == "random" {
         let batch4 = generate_multi(rows);
         let raw4 = rows * 8 * 4;
-        println!("\n── Multi-Column ({} rows × 4 cols, {}) ──",
-            fmt_rows(rows), human(raw4));
+        println!(
+            "\n── Multi-Column ({} rows × 4 cols, {}) ──",
+            fmt_rows(rows),
+            human(raw4)
+        );
         run_comparison(&batch4, raw4, pattern, "multi")?;
     }
 
@@ -62,9 +69,9 @@ fn run_comparison(batch: &RecordBatch, raw_bytes: usize, pattern: &str, kind: &s
 
     // ── FluxCompress profiles ────────────────────────────────────────────
     for (name, profile) in [
-        ("Flux (speed)",    CompressionProfile::Speed),
+        ("Flux (speed)", CompressionProfile::Speed),
         ("Flux (balanced)", CompressionProfile::Balanced),
-        ("Flux (archive)",  CompressionProfile::Archive),
+        ("Flux (archive)", CompressionProfile::Archive),
     ] {
         let writer = FluxWriter::with_profile(profile);
 
@@ -164,11 +171,17 @@ fn print_row(name: &str, size: usize, raw: usize, c_ms: f64, d_ms: f64, mm_ms: O
     let ratio = raw as f64 / size as f64;
     let c_mbs = mbs(raw, c_ms);
     let d_mbs = mbs(raw, d_ms);
-    let mm_str = mm_ms.map(|ms| format!("{:>9.0}", mbs(raw, ms)))
+    let mm_str = mm_ms
+        .map(|ms| format!("{:>9.0}", mbs(raw, ms)))
         .unwrap_or_else(|| "        -".to_string());
     println!(
         "  {:<24} {:>10} {:>7.1}x {:>9.0} {:>9.0} {}",
-        name, human(size), ratio, c_mbs, d_mbs, mm_str,
+        name,
+        human(size),
+        ratio,
+        c_mbs,
+        d_mbs,
+        mm_str,
     );
 }
 
@@ -177,50 +190,78 @@ fn print_row(name: &str, size: usize, raw: usize, c_ms: f64, d_ms: f64, mm_ms: O
 fn generate_single(rows: usize, pattern: &str) -> RecordBatch {
     let values: Vec<u64> = match pattern {
         "sequential" => (0u64..rows as u64).collect(),
-        "constant"   => vec![42u64; rows],
-        "random"     => {
+        "constant" => vec![42u64; rows],
+        "random" => {
             let mut s: u64 = 0xDEAD_BEEF_CAFE_BABE;
-            (0..rows).map(|_| { s ^= s<<13; s ^= s>>7; s ^= s<<17; s & 0xFFFF_FFFF_FFFF }).collect()
+            (0..rows)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    s & 0xFFFF_FFFF_FFFF
+                })
+                .collect()
         }
         _ => (0u64..rows as u64).collect(),
     };
-    let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::UInt64, false)]));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::UInt64,
+        false,
+    )]));
     RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(values))]).unwrap()
 }
 
 fn generate_multi(rows: usize) -> RecordBatch {
     let user_id: Vec<u64> = (0..rows as u64).collect();
     let revenue: Vec<u64> = (0..rows as u64).map(|i| (i * 37) % 99_999).collect();
-    let region:  Vec<u64> = (0..rows as u64).map(|i| i % 8).collect();
+    let region: Vec<u64> = (0..rows as u64).map(|i| i % 8).collect();
     let session: Vec<i64> = (0..rows as i64).map(|i| (i * 1234) % 86_400_000).collect();
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("user_id",    DataType::UInt64, false),
-        Field::new("revenue",    DataType::UInt64, false),
-        Field::new("region",     DataType::UInt64, false),
-        Field::new("session_ms", DataType::Int64,  false),
+        Field::new("user_id", DataType::UInt64, false),
+        Field::new("revenue", DataType::UInt64, false),
+        Field::new("region", DataType::UInt64, false),
+        Field::new("session_ms", DataType::Int64, false),
     ]));
-    RecordBatch::try_new(schema, vec![
-        Arc::new(UInt64Array::from(user_id)),
-        Arc::new(UInt64Array::from(revenue)),
-        Arc::new(UInt64Array::from(region)),
-        Arc::new(Int64Array::from(session)),
-    ]).unwrap()
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(UInt64Array::from(user_id)),
+            Arc::new(UInt64Array::from(revenue)),
+            Arc::new(UInt64Array::from(region)),
+            Arc::new(Int64Array::from(session)),
+        ],
+    )
+    .unwrap()
 }
 
 fn human(bytes: usize) -> String {
-    if bytes < 1024 { format!("{bytes} B") }
-    else if bytes < 1024*1024 { format!("{:.1} KB", bytes as f64/1024.0) }
-    else if bytes < 1024*1024*1024 { format!("{:.1} MB", bytes as f64/(1024.0*1024.0)) }
-    else { format!("{:.2} GB", bytes as f64/(1024.0*1024.0*1024.0)) }
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn fmt_rows(n: usize) -> String {
-    if n >= 1_000_000 { format!("{}M", n/1_000_000) }
-    else if n >= 1_000 { format!("{}K", n/1_000) }
-    else { format!("{n}") }
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        format!("{n}")
+    }
 }
 
 fn mbs(bytes: usize, ms: f64) -> f64 {
-    if ms <= 0.0 { f64::INFINITY } else { (bytes as f64/(1024.0*1024.0))/(ms/1000.0) }
+    if ms <= 0.0 {
+        f64::INFINITY
+    } else {
+        (bytes as f64 / (1024.0 * 1024.0)) / (ms / 1000.0)
+    }
 }

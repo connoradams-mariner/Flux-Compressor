@@ -268,7 +268,10 @@ fn reinflate_with_nulls(
 
     // Layer the original null buffer onto the taken array.
     let data = taken.to_data();
-    let new_data = data.into_builder().nulls(Some(nulls.clone())).build()
+    let new_data = data
+        .into_builder()
+        .nulls(Some(nulls.clone()))
+        .build()
         .map_err(|e| FluxError::Internal(format!("null_aware nulls: {e}")))?;
     Ok(arrow_array::make_array(new_data))
 }
@@ -291,11 +294,7 @@ mod tests {
         let a = Int64Array::from(vec![Some(1), None, Some(3), Some(4), None]);
         let b = StringArray::from(vec![Some("x"), Some("y"), None, Some("z"), None]);
         let c = Int64Array::from(vec![10, 20, 30, 40, 50]);
-        RecordBatch::try_new(
-            schema(),
-            vec![Arc::new(a), Arc::new(b), Arc::new(c)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema(), vec![Arc::new(a), Arc::new(b), Arc::new(c)]).unwrap()
     }
 
     #[test]
@@ -311,14 +310,21 @@ mod tests {
         // Column a: nulls at positions 1, 4.
         let a = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(a.len(), 5);
-        assert_eq!(a.is_null(0), false); assert_eq!(a.value(0), 1);
+        assert_eq!(a.is_null(0), false);
+        assert_eq!(a.value(0), 1);
         assert_eq!(a.is_null(1), true);
-        assert_eq!(a.is_null(2), false); assert_eq!(a.value(2), 3);
-        assert_eq!(a.is_null(3), false); assert_eq!(a.value(3), 4);
+        assert_eq!(a.is_null(2), false);
+        assert_eq!(a.value(2), 3);
+        assert_eq!(a.is_null(3), false);
+        assert_eq!(a.value(3), 4);
         assert_eq!(a.is_null(4), true);
 
         // Column b: nulls at positions 2, 4.
-        let b = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let b = out
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         assert_eq!(b.value(0), "x");
         assert_eq!(b.value(1), "y");
         assert_eq!(b.is_null(2), true);

@@ -18,16 +18,16 @@
 //!     bench       Run a quick compression benchmark
 //! ```
 
-mod optimizer;
-mod inspector;
 mod bench;
-mod dtype_bench;
-mod string_bench;
-mod mixed_bench;
 mod compare_bench;
+mod dtype_bench;
+mod inspector;
+mod mixed_bench;
+mod optimizer;
+mod string_bench;
 
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,42 +160,26 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
-        Commands::Compress { input, output, strategy } => {
-            cmd_compress(&input, &output, &strategy)
-        }
-        Commands::Decompress { input, output } => {
-            cmd_decompress(&input, &output)
-        }
-        Commands::Optimize { input_dir, output, block_kb } => {
-            optimizer::cmd_optimize(&input_dir, &output, block_kb)
-        }
-        Commands::Merge { inputs, output } => {
-            cmd_merge(&inputs, &output)
-        }
-        Commands::Inspect { file, format } => {
-            inspector::cmd_inspect(&file, &format)
-        }
-        Commands::Bench { rows, pattern } => {
-            bench::cmd_bench(rows, &pattern)
-        }
-        Commands::DtypeBench { rows } => {
-            dtype_bench::cmd_dtype_bench(rows)
-        }
-        Commands::StringBench { rows } => {
-            string_bench::cmd_string_bench(rows)
-        }
-        Commands::MixedBench { rows } => {
-            mixed_bench::cmd_mixed_bench(rows)
-        }
-        Commands::CompareBench { rows } => {
-            compare_bench::cmd_compare_bench(rows)
-        }
-        Commands::StringCompareBench { rows } => {
-            compare_bench::cmd_string_compare_bench(rows)
-        }
-        Commands::FloatCompareBench { rows } => {
-            compare_bench::cmd_float_compare_bench(rows)
-        }
+        Commands::Compress {
+            input,
+            output,
+            strategy,
+        } => cmd_compress(&input, &output, &strategy),
+        Commands::Decompress { input, output } => cmd_decompress(&input, &output),
+        Commands::Optimize {
+            input_dir,
+            output,
+            block_kb,
+        } => optimizer::cmd_optimize(&input_dir, &output, block_kb),
+        Commands::Merge { inputs, output } => cmd_merge(&inputs, &output),
+        Commands::Inspect { file, format } => inspector::cmd_inspect(&file, &format),
+        Commands::Bench { rows, pattern } => bench::cmd_bench(rows, &pattern),
+        Commands::DtypeBench { rows } => dtype_bench::cmd_dtype_bench(rows),
+        Commands::StringBench { rows } => string_bench::cmd_string_bench(rows),
+        Commands::MixedBench { rows } => mixed_bench::cmd_mixed_bench(rows),
+        Commands::CompareBench { rows } => compare_bench::cmd_compare_bench(rows),
+        Commands::StringCompareBench { rows } => compare_bench::cmd_string_compare_bench(rows),
+        Commands::FloatCompareBench { rows } => compare_bench::cmd_float_compare_bench(rows),
     }
 }
 
@@ -203,15 +187,9 @@ fn main() -> Result<()> {
 // compress
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn cmd_compress(
-    input: &std::path::Path,
-    output: &std::path::Path,
-    strategy: &str,
-) -> Result<()> {
+fn cmd_compress(input: &std::path::Path, output: &std::path::Path, strategy: &str) -> Result<()> {
     use loom::{
-        compressors::flux_writer::FluxWriter,
-        loom_classifier::LoomStrategy,
-        traits::LoomCompressor,
+        compressors::flux_writer::FluxWriter, loom_classifier::LoomStrategy, traits::LoomCompressor,
     };
     use std::fs;
 
@@ -220,18 +198,18 @@ fn cmd_compress(
     let batches = load_arrow_batches(input)?;
 
     let forced: Option<LoomStrategy> = match strategy {
-        "auto"    => None,
-        "rle"     => Some(LoomStrategy::Rle),
-        "delta"   => Some(LoomStrategy::DeltaDelta),
-        "dict"    => Some(LoomStrategy::Dictionary),
+        "auto" => None,
+        "rle" => Some(LoomStrategy::Rle),
+        "delta" => Some(LoomStrategy::DeltaDelta),
+        "dict" => Some(LoomStrategy::Dictionary),
         "bitslab" => Some(LoomStrategy::BitSlab),
-        "lz4"     => Some(LoomStrategy::SimdLz4),
-        other     => anyhow::bail!("unknown strategy '{other}'"),
+        "lz4" => Some(LoomStrategy::SimdLz4),
+        other => anyhow::bail!("unknown strategy '{other}'"),
     };
 
     let writer = match forced {
         Some(s) => FluxWriter::with_strategy(s),
-        None    => FluxWriter::new(),
+        None => FluxWriter::new(),
     };
 
     let flux_bytes = writer.compress_all(&batches)?;
@@ -252,8 +230,8 @@ fn cmd_compress(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn cmd_decompress(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
-    use loom::{decompressors::flux_reader::FluxReader, traits::LoomDecompressor};
     use arrow::ipc::writer::FileWriter;
+    use loom::{decompressors::flux_reader::FluxReader, traits::LoomDecompressor};
     use std::fs::{self, File};
 
     let flux_bytes = fs::read(input)?;
@@ -274,8 +252,8 @@ fn cmd_decompress(input: &std::path::Path, output: &std::path::Path) -> Result<(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn cmd_merge(inputs: &[std::path::PathBuf], output: &std::path::Path) -> Result<()> {
-    use std::fs;
     use loom::atlas::{AtlasFooter, BLOCK_META_SIZE};
+    use std::fs;
 
     let mut combined_data: Vec<u8> = Vec::new();
     let mut combined_footer = AtlasFooter::new();

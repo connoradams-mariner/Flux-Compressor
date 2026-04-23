@@ -3,13 +3,13 @@
 
 //! Core trait definitions that every compression strategy must satisfy.
 
+use crate::error::{FluxError, FluxResult};
+use arrow_array::cast::AsArray;
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int64Array, RecordBatch, StringArray,
     UInt32Array, UInt64Array,
 };
-use arrow_array::cast::AsArray;
 use arrow_schema::DataType;
-use crate::error::{FluxError, FluxResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Predicate (for pushdown)
@@ -78,17 +78,17 @@ impl Predicate {
                 // store a 16-byte prefix, this is conservative.
                 prefix_lex_le(block_min, v) && prefix_lex_le(v, block_max)
             }
-            Predicate::InStr { values, .. } => {
-                values.iter().any(|v| {
-                    let b = v.as_bytes();
-                    prefix_lex_le(block_min, b) && prefix_lex_le(b, block_max)
-                })
+            Predicate::InStr { values, .. } => values.iter().any(|v| {
+                let b = v.as_bytes();
+                prefix_lex_le(block_min, b) && prefix_lex_le(b, block_max)
+            }),
+            Predicate::And(a, b) => {
+                a.may_overlap_str(block_min, block_max) && b.may_overlap_str(block_min, block_max)
             }
-            Predicate::And(a, b) => a.may_overlap_str(block_min, block_max)
-                                 && b.may_overlap_str(block_min, block_max),
-            Predicate::Or(a, b)  => a.may_overlap_str(block_min, block_max)
-                                 || b.may_overlap_str(block_min, block_max),
-            _ => true,  // numeric variants always pass through
+            Predicate::Or(a, b) => {
+                a.may_overlap_str(block_min, block_max) || b.may_overlap_str(block_min, block_max)
+            }
+            _ => true, // numeric variants always pass through
         }
     }
 
@@ -111,12 +111,13 @@ impl Predicate {
         let n = batch.num_rows();
         match self {
             Predicate::None => Ok(BooleanArray::from(vec![true; n])),
-            Predicate::GreaterThan { column, value } =>
-                eval_cmp_scalar(batch, column, *value, CmpOp::Gt),
-            Predicate::LessThan { column, value } =>
-                eval_cmp_scalar(batch, column, *value, CmpOp::Lt),
-            Predicate::Equal { column, value } =>
-                eval_cmp_scalar(batch, column, *value, CmpOp::Eq),
+            Predicate::GreaterThan { column, value } => {
+                eval_cmp_scalar(batch, column, *value, CmpOp::Gt)
+            }
+            Predicate::LessThan { column, value } => {
+                eval_cmp_scalar(batch, column, *value, CmpOp::Lt)
+            }
+            Predicate::Equal { column, value } => eval_cmp_scalar(batch, column, *value, CmpOp::Eq),
             Predicate::Between { column, lo, hi } => {
                 // BETWEEN is inclusive on both ends — materialise as
                 // `(col >= lo) AND (col <= hi)`.
@@ -124,10 +125,12 @@ impl Predicate {
                 let le = eval_cmp_scalar(batch, column, *hi, CmpOp::Le)?;
                 Ok(and_boolean(&ge, &le))
             }
-            Predicate::EqualStr { column, value } =>
-                eval_string_equal(batch, column, std::slice::from_ref(value)),
-            Predicate::InStr { column, values } =>
-                eval_string_equal(batch, column, values.as_slice()),
+            Predicate::EqualStr { column, value } => {
+                eval_string_equal(batch, column, std::slice::from_ref(value))
+            }
+            Predicate::InStr { column, values } => {
+                eval_string_equal(batch, column, values.as_slice())
+            }
             Predicate::And(a, b) => {
                 let la = a.eval_on_batch(batch)?;
                 let lb = b.eval_on_batch(batch)?;
@@ -143,14 +146,20 @@ impl Predicate {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum CmpOp { Gt, Lt, Eq, Ge, Le }
+enum CmpOp {
+    Gt,
+    Lt,
+    Eq,
+    Ge,
+    Le,
+}
 
 impl CmpOp {
     #[inline]
     fn apply<T: PartialOrd>(self, a: &T, b: &T) -> bool {
         match self {
-            CmpOp::Gt => a >  b,
-            CmpOp::Lt => a <  b,
+            CmpOp::Gt => a > b,
+            CmpOp::Lt => a < b,
             CmpOp::Eq => a == b,
             CmpOp::Ge => a >= b,
             CmpOp::Le => a <= b,
@@ -242,15 +251,12 @@ fn eval_string_equal(
     let arr = batch.column(idx);
     let n = arr.len();
 
-    let strings: &StringArray = arr
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            FluxError::Internal(format!(
-                "EqualStr / InStr require a Utf8 column; got {:?}",
-                arr.data_type()
-            ))
-        })?;
+    let strings: &StringArray = arr.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+        FluxError::Internal(format!(
+            "EqualStr / InStr require a Utf8 column; got {:?}",
+            arr.data_type()
+        ))
+    })?;
 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -276,8 +282,8 @@ fn prefix_lex_le(a: &[u8], b: &[u8]) -> bool {
     let n = a.len().min(b.len());
     let cmp = a[..n].cmp(&b[..n]);
     match cmp {
-        std::cmp::Ordering::Less    => true,
-        std::cmp::Ordering::Equal   => true,  // prefix-equal — conservative
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Equal => true, // prefix-equal — conservative
         std::cmp::Ordering::Greater => false,
     }
 }
@@ -288,10 +294,7 @@ fn and_boolean(a: &BooleanArray, b: &BooleanArray) -> BooleanArray {
     let n = a.len();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        out.push(
-            !a.is_null(i) && !b.is_null(i)
-            && a.value(i) && b.value(i),
-        );
+        out.push(!a.is_null(i) && !b.is_null(i) && a.value(i) && b.value(i));
     }
     BooleanArray::from(out)
 }
@@ -302,10 +305,7 @@ fn or_boolean(a: &BooleanArray, b: &BooleanArray) -> BooleanArray {
     let n = a.len();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        out.push(
-            (!a.is_null(i) && a.value(i))
-            || (!b.is_null(i) && b.value(i)),
-        );
+        out.push((!a.is_null(i) && a.value(i)) || (!b.is_null(i) && b.value(i)));
     }
     BooleanArray::from(out)
 }
@@ -377,11 +377,7 @@ pub trait FluxCapacitorTrait: Send + Sync {
     fn optimize(&self, output_path: &std::path::Path) -> FluxResult<()>;
 
     /// Merge two or more `.flux` files into one, updating the Atlas footer.
-    fn merge(
-        &self,
-        inputs: &[&std::path::Path],
-        output: &std::path::Path,
-    ) -> FluxResult<()>;
+    fn merge(&self, inputs: &[&std::path::Path], output: &std::path::Path) -> FluxResult<()>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,18 +387,20 @@ pub trait FluxCapacitorTrait: Send + Sync {
 #[cfg(test)]
 mod predicate_eval_tests {
     use super::*;
-    use std::sync::Arc;
     use arrow_array::{Int64Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     fn batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("x", DataType::Int64, true),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
         RecordBatch::try_new(
             schema,
             vec![Arc::new(Int64Array::from(vec![
-                Some(1), Some(5), Some(10), None, Some(15),
+                Some(1),
+                Some(5),
+                Some(10),
+                None,
+                Some(15),
             ]))],
         )
         .unwrap()
@@ -411,7 +409,10 @@ mod predicate_eval_tests {
     #[test]
     fn gt_masks_rows_correctly() {
         let b = batch();
-        let p = Predicate::GreaterThan { column: "x".into(), value: 5 };
+        let p = Predicate::GreaterThan {
+            column: "x".into(),
+            value: 5,
+        };
         let mask = p.eval_on_batch(&b).unwrap();
         // Expect: [false, false, true, false(null), true]
         let got: Vec<bool> = (0..mask.len()).map(|i| mask.value(i)).collect();
@@ -421,7 +422,11 @@ mod predicate_eval_tests {
     #[test]
     fn between_inclusive() {
         let b = batch();
-        let p = Predicate::Between { column: "x".into(), lo: 5, hi: 10 };
+        let p = Predicate::Between {
+            column: "x".into(),
+            lo: 5,
+            hi: 10,
+        };
         let mask = p.eval_on_batch(&b).unwrap();
         let got: Vec<bool> = (0..mask.len()).map(|i| mask.value(i)).collect();
         assert_eq!(got, vec![false, true, true, false, false]);
@@ -430,8 +435,14 @@ mod predicate_eval_tests {
     #[test]
     fn and_or_composition() {
         let b = batch();
-        let gt = Predicate::GreaterThan { column: "x".into(), value: 0 };
-        let lt = Predicate::LessThan    { column: "x".into(), value: 10 };
+        let gt = Predicate::GreaterThan {
+            column: "x".into(),
+            value: 0,
+        };
+        let lt = Predicate::LessThan {
+            column: "x".into(),
+            value: 10,
+        };
         let both = Predicate::And(Box::new(gt.clone()), Box::new(lt.clone()));
         let mask = both.eval_on_batch(&b).unwrap();
         let got: Vec<bool> = (0..mask.len()).map(|i| mask.value(i)).collect();

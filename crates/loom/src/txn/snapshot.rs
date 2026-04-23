@@ -194,10 +194,7 @@ mod tests {
 
         let mut v2 = make_entry(2, 3000, Operation::Compact);
         v2.data_files_added = vec!["data/part-0002.flux".into()];
-        v2.data_files_removed = vec![
-            "data/part-0000.flux".into(),
-            "data/part-0001.flux".into(),
-        ];
+        v2.data_files_removed = vec!["data/part-0000.flux".into(), "data/part-0001.flux".into()];
 
         vec![v0, v1, v2]
     }
@@ -240,11 +237,7 @@ mod tests {
 
     #[test]
     fn schema_chain_is_replayed() {
-        let schema0 = TableSchema::new(vec![SchemaField::new(
-            1,
-            "id",
-            FluxDType::UInt64,
-        )]);
+        let schema0 = TableSchema::new(vec![SchemaField::new(1, "id", FluxDType::UInt64)]);
         let schema1 = TableSchema {
             schema_id: 1,
             parent_schema_id: Some(0),

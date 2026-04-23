@@ -182,10 +182,13 @@ pub struct TableMeta {
 }
 
 fn default_table_id() -> String {
-    format!("flux-{:016x}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos())
+    format!(
+        "flux-{:016x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
 }
 
 impl Default for TableMeta {
@@ -204,7 +207,9 @@ impl Default for TableMeta {
 impl TableMeta {
     /// Get the current partition spec, if any.
     pub fn current_spec(&self) -> Option<&PartitionSpec> {
-        self.partition_specs.iter().find(|s| s.spec_id == self.current_spec_id)
+        self.partition_specs
+            .iter()
+            .find(|s| s.spec_id == self.current_spec_id)
     }
 
     /// Read from a `_flux_meta.json` file.
@@ -261,12 +266,22 @@ mod tests {
             file_size_bytes: 25_000_000,
             column_stats: [(
                 "revenue".into(),
-                ColumnStats { min: Some("0.0".into()), max: Some("49999.5".into()), null_count: 0 },
-            )].into(),
+                ColumnStats {
+                    min: Some("0.0".into()),
+                    max: Some("49999.5".into()),
+                    null_count: 0,
+                },
+            )]
+            .into(),
             column_stats_by_field_id: [(
                 7u32,
-                ColumnStats { min: Some("0.0".into()), max: Some("49999.5".into()), null_count: 0 },
-            )].into(),
+                ColumnStats {
+                    min: Some("0.0".into()),
+                    max: Some("49999.5".into()),
+                    null_count: 0,
+                },
+            )]
+            .into(),
         };
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         let parsed: FileManifest = serde_json::from_str(&json).unwrap();
