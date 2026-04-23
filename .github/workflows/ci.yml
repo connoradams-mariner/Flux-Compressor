@@ -108,4 +108,13 @@ jobs:
       - name: Build Python extension (develop mode)
         run: maturin develop --release -m crates/python/Cargo.toml
       - name: Run Python tests
-        run: pytest python/tests/ -v
+        # `--benchmark-disable` keeps the bench-fixture tests as
+        # correctness smoke-tests (single iteration, no statistical
+        # sampling) instead of the default 5-round calibrated sweep.
+        # Without this flag the CI run balloons to 20+ minutes because
+        # `test_benchmarks.py` parametrizes up to 1 M rows across 27
+        # benchmark cases.
+        #
+        # Run the full benchmark sweep locally with:
+        #     pytest python/tests/ --benchmark-only -v
+        run: pytest python/tests/ -v --benchmark-disable

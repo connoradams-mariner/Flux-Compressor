@@ -878,9 +878,17 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 
 ## Using FluxCompress from Databricks / PySpark
 
+> **Supported compute tiers:** Databricks **Classic** compute
+> (Single User / Shared / No Isolation Shared). **Serverless compute
+> is not supported today** — it blocks Maven library installs and
+> `System.load()` for JNI libraries. Serverless users can still run
+> the Python-only path (`pip install fluxcompress` → `fc.compress_polars`)
+> but not the Spark DSv2 `format("flux")` integration. Details +
+> roadmap: [docs/databricks.md](docs/databricks.md#serverless-limitations).
+
 ```python
 # Install the Maven library on your cluster:
-#   com.datamariners.fluxcompress:flux-spark-connector_2.12:0.5.0
+#   com.datamariners.fluxcompress:flux-spark-connector_2.12:0.5.4
 # (the JAR ships the right flux_jni cdylib for every major OS + arch,
 #  so no DBFS sidecar is required).
 
