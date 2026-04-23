@@ -38,7 +38,7 @@ ThisBuild / scmInfo := Some(
 // Version is overridden by the release-maven workflow via
 // `set ThisBuild / version := "<tag>"`; the default here only matters
 // for local development.
-ThisBuild / version      := "0.5.2"
+ThisBuild / version      := "0.5.3"
 ThisBuild / scalaVersion := "2.12.18"
 ThisBuild / crossScalaVersions := Seq("2.12.18", "2.13.12")
 
@@ -70,7 +70,14 @@ val arrowVersion = "15.0.0"
 
 lazy val sparkConnector = (project in file("."))
   .settings(
-    name := "flux-spark-connector",
+    name        := "flux-spark-connector",
+    // Maven POM requires a human-readable description for any
+    // artefact published to Sonatype Central Portal.
+    description := "Spark DataSource V2 connector for FluxCompress — " +
+      "read and write `.flux` tables from Spark 3.5 with " +
+      "`df.write.format(\"flux\")`. Bundles the `flux_jni` native " +
+      "library for Linux x86_64 / aarch64, macOS x64 / arm64, and " +
+      "Windows x64 so no DBFS sidecar is required.",
 
     // Java 8 bytecode for the broadest Spark compatibility.
     javacOptions ++= Seq("-source", "1.8", "-target", "1.8"),
@@ -94,10 +101,10 @@ lazy val sparkConnector = (project in file("."))
       "org.apache.spark"  %% "spark-catalyst"   % sparkVersion % Test,
     ),
 
-    // Make the `java/` directory in the repo root visible so the
-    // generated JAR contains `FluxNative`.  Users who already have the
-    // FluxNative class on their classpath can strip this out.
-    Compile / unmanagedSourceDirectories += baseDirectory.value / ".." / "java",
+    // `FluxNative.java` lives at `src/main/java/com/datamariners/fluxcompress/`
+    // (the default sbt Java source path) so sbt + zinc pick it up
+    // automatically. No manual `unmanagedSourceDirectories` hack
+    // required.
 
     // The JNI cdylib lives under `target/release/` of the Cargo build.
     // Propagate it into test JVM forks so `System.loadLibrary(\"flux_jni\")`

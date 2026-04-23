@@ -6,6 +6,7 @@
 # rename at the dependency line (`loom = { package = "flux-loom" }`).
 name        = "flux-loom"
 description = "FluxCompress core compression engine – adaptive columnar storage"
+readme      = "README.md"
 version.workspace     = true
 edition.workspace     = true
 license.workspace     = true

@@ -79,8 +79,15 @@ fn bench_simd_unpack(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(buf.len() as u64));
         g.bench_with_input(BenchmarkId::new("unpack", w), &w, |b, &w| {
             b.iter(|| {
+                // Returning `black_box(&out)` from a `FnMut` closure that
+                // captures `out` by reference is rejected by rustc 1.80+
+                // ("captured variable cannot escape FnMut closure body").
+                // The workaround: consume the side-effecting call in a
+                // trivial `black_box(())` so no captured reference leaves
+                // the closure — the compiler still can't elide the call
+                // because `simd::unpack` writes through `&mut out`.
                 simd::unpack(black_box(&buf), w, SEGMENT_SIZE, black_box(&mut out)).unwrap();
-                black_box(&out)
+                black_box(());
             });
         });
     }

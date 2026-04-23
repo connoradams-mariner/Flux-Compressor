@@ -1,6 +1,7 @@
 [package]
 name        = "flux-jni-bridge"
 description = "JNI bridge exposing FluxCompress to the Spark/JVM ecosystem"
+readme      = "README.md"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -15,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Pull `flux-loom` from crates.io / path, alias it as `loom` locally
 # so `use loom::…` inside this crate stays unchanged.
-loom         = { path = "../loom", package = "flux-loom", version = "0.5.2" }
+loom         = { path = "../loom", package = "flux-loom", version = "0.5.3" }
 jni          = { version = "0.21", features = ["invocation"] }
 arrow        = { workspace = true }
 arrow-array  = { workspace = true }

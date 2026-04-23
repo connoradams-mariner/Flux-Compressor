@@ -44,14 +44,18 @@ object SparkArrowBridge {
    * `FluxDataWriter` (outside this package) can use the same conversion
    * without reaching into the private symbol directly.
    *
-   * Uses the 2-argument signature (`schema, timeZoneId`) that ships in
-   * Spark 3.5.0 and 3.5.1.  The 4-arg variant that takes
-   * `errorOnDuplicatedFieldNames` / `largeVarTypes` was only added in
-   * Spark 3.5.2, so we target the lowest 3.5 minor for broadest
-   * Databricks runtime compatibility.
+   * Uses the 4-argument signature that ships in Spark 3.5.1 /
+   * `branch-3.5`. `errorOnDuplicatedFieldNames = false` and
+   * `largeVarTypes = false` match Spark's own default call-sites for
+   * DataSource V2 writers.
    */
   def toArrowSchema(schema: StructType): org.apache.arrow.vector.types.pojo.Schema =
-    ArrowUtils.toArrowSchema(schema, TimeZone)
+    ArrowUtils.toArrowSchema(
+      schema,
+      TimeZone,
+      errorOnDuplicatedFieldNames = false,
+      largeVarTypes = false,
+    )
 
   /**
    * Allocate a root Arrow allocator.  Callers are responsible for
@@ -74,7 +78,7 @@ object SparkArrowBridge {
       schema: StructType,
       allocator: BufferAllocator,
   ): Array[Byte] = {
-    val arrowSchema = ArrowUtils.toArrowSchema(schema, TimeZone)
+    val arrowSchema = toArrowSchema(schema)
     val root        = VectorSchemaRoot.create(arrowSchema, allocator)
     val arrowWriter = ArrowWriter.create(root)
     try {

@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "flux-jni-bridge"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "flux-loom"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "fluxcapacitor"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "fluxcompress-python"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "arrow",
  "arrow-array",

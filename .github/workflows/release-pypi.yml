@@ -8,8 +8,8 @@
 #
 #   Linux    x86_64         (manylinux 2_17)
 #   Linux    aarch64        (manylinux 2_17, via cross)
-#   macOS    x86_64         (runner: macos-13)
-#   macOS    arm64          (runner: macos-14 / Apple Silicon)
+#   macOS    x86_64         (runner: macos-14, cross-compiled from arm64)
+#   macOS    arm64          (runner: macos-14 / Apple Silicon, native)
 #   Windows  x86_64         (runner: windows-latest)
 #
 # Each wheel targets abi3-py38 (Stable ABI) so a single wheel covers
@@ -52,13 +52,22 @@ jobs:
 
   macos:
     name: Build wheel — macOS ${{ matrix.target }}
-    # macos-13 is Intel, macos-14 is Apple Silicon. Using explicit OS
-    # pins guarantees native builds for each target.
+    #
+    # Both macOS targets run on the Apple Silicon fleet (`macos-14`).
+    # The arm64 runner natively builds `aarch64-apple-darwin` and
+    # cross-compiles `x86_64-apple-darwin` via the pre-installed
+    # universal Xcode toolchain — zero extra setup required.
+    #
+    # We previously pinned the Intel target to `macos-13`, but the
+    # Intel-x86_64 public runner fleet is being sunset and can block
+    # queued jobs for 10–30 minutes at a time.  The Apple Silicon
+    # fleet is ~3-4× bigger and charges the same minute multiplier, so
+    # we consolidate both macOS jobs there.
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin

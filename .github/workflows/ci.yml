@@ -90,10 +90,18 @@ jobs:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install maturin + test deps
+      - name: Create virtualenv + install maturin + test deps
         run: |
+          python -m venv .venv
+          # shellcheck source=/dev/null
+          source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install maturin pytest pyarrow polars
+          # Expose the venv to subsequent steps by exporting its bin
+          # dir onto GITHUB_PATH; `maturin develop` refuses to install
+          # into the system Python, so it needs an active venv.
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
       - name: Build Python extension (develop mode)
         run: maturin develop --release -m crates/python/Cargo.toml
       - name: Run Python tests

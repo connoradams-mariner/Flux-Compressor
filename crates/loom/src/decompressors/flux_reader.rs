@@ -1337,10 +1337,13 @@ mod tests {
         // Build a `Vec<u64>` that represents known `f64` bit patterns,
         // reconstruct it through the zero-copy path, and verify every
         // value decodes back to the expected `f64`.
+        // Pick arbitrary decimals that don't approximate any
+        // `std::f64::consts::*` value. Clippy's `approx_constant` lint
+        // blocks 3.14… (PI), 2.71… (E), 1.41… (SQRT_2), etc.
         let originals: Vec<f64> = vec![
             0.0,
             1.5,
-            -3.14,
+            -5.75,
             1e308,
             -1e-308,
             f64::INFINITY,
