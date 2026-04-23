@@ -1,15 +1,15 @@
 // Copyright 2024 FluxCompress Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-package io.fluxcompress.spark
+package com.datamariners.fluxcompress.spark
 
-import io.fluxcompress.FluxNative
+import com.datamariners.fluxcompress.FluxNative
 
 import org.apache.spark.sql.fluxcompress.SparkArrowBridge
 import org.apache.spark.sql.types.StructType
 
 /**
- * Scala-flavoured facade around [[io.fluxcompress.FluxNative]].
+ * Scala-flavoured facade around [[com.datamariners.fluxcompress.FluxNative]].
  *
  * The raw JNI class is a static `native` surface with unchecked
  * exceptions and manual handle lifecycles.  This facade wraps the

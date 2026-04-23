@@ -24,6 +24,7 @@ mod bench;
 mod dtype_bench;
 mod string_bench;
 mod mixed_bench;
+mod compare_bench;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -121,6 +122,27 @@ enum Commands {
         #[arg(long, default_value_t = 9_950_000)]
         rows: usize,
     },
+
+    /// Three-way compare: Flux vs Parquet vs Delta Lake on a 22-column
+    /// mixed-schema dataset (Delta = Parquet + _delta_log/ JSON log).
+    CompareBench {
+        #[arg(long, default_value_t = 1_000_000)]
+        rows: usize,
+    },
+
+    /// Three-way compare on a string-heavy schema (10 string columns +
+    /// 2 ids + 1 timestamp) — models log / event / clickstream data.
+    StringCompareBench {
+        #[arg(long, default_value_t = 1_000_000)]
+        rows: usize,
+    },
+
+    /// Three-way compare on a float-heavy schema (10 Float64 columns +
+    /// 2 ids + 1 timestamp) — models scientific / IoT / financial data.
+    FloatCompareBench {
+        #[arg(long, default_value_t = 1_000_000)]
+        rows: usize,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +186,15 @@ fn main() -> Result<()> {
         }
         Commands::MixedBench { rows } => {
             mixed_bench::cmd_mixed_bench(rows)
+        }
+        Commands::CompareBench { rows } => {
+            compare_bench::cmd_compare_bench(rows)
+        }
+        Commands::StringCompareBench { rows } => {
+            compare_bench::cmd_string_compare_bench(rows)
+        }
+        Commands::FloatCompareBench { rows } => {
+            compare_bench::cmd_float_compare_bench(rows)
         }
     }
 }

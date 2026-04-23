@@ -1,14 +1,18 @@
 # Roadmap: Row-Level Mutations (MERGE / UPDATE / DELETE)
 
-Status: design + Part 2 primitive implemented.
+Status: Parts 2-5 implemented; Phase D (deletion vectors) deferred.
 
 - [x] **Part 2 — row-level predicate evaluation**
       (`Predicate::eval_on_batch` in `crates/loom/src/traits.rs`).
       Benched via `cargo bench --bench predicate_eval`.
-- [ ] Part 3 — DELETE via COW (`FluxTable::delete_where`).
-- [ ] Part 4 — UPDATE via COW (`FluxTable::update_where`).
-- [ ] Part 5 — MERGE via COW (`FluxTable::merge`).
-- [ ] Phase D — deletion vectors (deferred).
+- [x] **Part 3 — DELETE via COW** (`FluxTable::delete_where`).
+      Manifest-pruned per-file eval + `(remove, add)` commit.
+- [x] **Part 4 — UPDATE via COW** (`FluxTable::update_where`).
+      `ScalarValue` broadcast via `arrow::compute::zip` (`if_then_else`).
+- [x] **Part 5 — MERGE via COW** (`FluxTable::merge`).
+      `when_not_matched` fast-path implemented; richer `when_matched`
+      clauses that walk the hash join in Arrow land remain follow-up.
+- [ ] Phase D — deletion vectors (deferred; needs format change).
 
 This document maps out how FluxTable will support MERGE, UPDATE, and
 DELETE operations on top of the v2 action-based log. The design

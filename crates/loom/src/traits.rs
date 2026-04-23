@@ -4,7 +4,7 @@
 //! Core trait definitions that every compression strategy must satisfy.
 
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int64Array, RecordBatch,
+    Array, BooleanArray, Float32Array, Float64Array, Int64Array, RecordBatch, StringArray,
     UInt32Array, UInt64Array,
 };
 use arrow_array::cast::AsArray;
@@ -31,6 +31,10 @@ pub enum Predicate {
     Equal { column: String, value: i128 },
     /// `column BETWEEN lo AND hi`
     Between { column: String, lo: i128, hi: i128 },
+    /// Part 9: `column == string_value` for Utf8 columns.
+    EqualStr { column: String, value: String },
+    /// Part 9: `column IN (values...)` for Utf8 columns.
+    InStr { column: String, values: Vec<String> },
     /// Logical AND of two predicates.
     And(Box<Predicate>, Box<Predicate>),
     /// Logical OR of two predicates.
@@ -47,8 +51,44 @@ impl Predicate {
             Predicate::LessThan { value, .. } => min < *value,
             Predicate::Equal { value, .. } => min <= *value && *value <= max,
             Predicate::Between { lo, hi, .. } => min <= *hi && max >= *lo,
+            // String predicates are always optimistic at the u128 block
+            // level — the caller should use [`may_overlap_str`] when it
+            // has access to the lexicographic block min/max.
+            Predicate::EqualStr { .. } | Predicate::InStr { .. } => true,
             Predicate::And(a, b) => a.may_overlap(min, max) && b.may_overlap(min, max),
             Predicate::Or(a, b) => a.may_overlap(min, max) || b.may_overlap(min, max),
+        }
+    }
+
+    /// Part 9: block-level overlap check for **string** predicates.
+    ///
+    /// `block_min` and `block_max` are the first `N` bytes of the
+    /// block's lexicographic min / max (Flux stores these as `u128`
+    /// so we pass the full 16-byte prefix here). Numeric variants
+    /// always return `true` — callers route those through
+    /// [`may_overlap`] instead.
+    pub fn may_overlap_str(&self, block_min: &[u8], block_max: &[u8]) -> bool {
+        match self {
+            Predicate::None => true,
+            Predicate::EqualStr { value, .. } => {
+                let v = value.as_bytes();
+                // value is in [min, max] iff min ≤ v ≤ max (byte-lex).
+                // Use prefix comparison: if the block's min exceeds v or
+                // the block's max is less than v, skip. Since we only
+                // store a 16-byte prefix, this is conservative.
+                prefix_lex_le(block_min, v) && prefix_lex_le(v, block_max)
+            }
+            Predicate::InStr { values, .. } => {
+                values.iter().any(|v| {
+                    let b = v.as_bytes();
+                    prefix_lex_le(block_min, b) && prefix_lex_le(b, block_max)
+                })
+            }
+            Predicate::And(a, b) => a.may_overlap_str(block_min, block_max)
+                                 && b.may_overlap_str(block_min, block_max),
+            Predicate::Or(a, b)  => a.may_overlap_str(block_min, block_max)
+                                 || b.may_overlap_str(block_min, block_max),
+            _ => true,  // numeric variants always pass through
         }
     }
 
@@ -84,6 +124,10 @@ impl Predicate {
                 let le = eval_cmp_scalar(batch, column, *hi, CmpOp::Le)?;
                 Ok(and_boolean(&ge, &le))
             }
+            Predicate::EqualStr { column, value } =>
+                eval_string_equal(batch, column, std::slice::from_ref(value)),
+            Predicate::InStr { column, values } =>
+                eval_string_equal(batch, column, values.as_slice()),
             Predicate::And(a, b) => {
                 let la = a.eval_on_batch(batch)?;
                 let lb = b.eval_on_batch(batch)?;
@@ -183,6 +227,59 @@ fn eval_cmp_scalar(
     };
     // Safety: `out.len() == n`.
     Ok(BooleanArray::from(out))
+}
+
+/// Part 9: evaluate `column IN (values...)` (or `==` when `values` is a
+/// one-element slice) over a [`StringArray`] column.
+fn eval_string_equal(
+    batch: &RecordBatch,
+    column: &str,
+    values: &[String],
+) -> FluxResult<BooleanArray> {
+    let idx = batch.schema().index_of(column).map_err(|e| {
+        FluxError::Internal(format!("predicate column '{column}' not in batch: {e}"))
+    })?;
+    let arr = batch.column(idx);
+    let n = arr.len();
+
+    let strings: &StringArray = arr
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            FluxError::Internal(format!(
+                "EqualStr / InStr require a Utf8 column; got {:?}",
+                arr.data_type()
+            ))
+        })?;
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        if strings.is_null(i) {
+            out.push(false);
+            continue;
+        }
+        let v = strings.value(i);
+        out.push(values.iter().any(|needle| needle.as_str() == v));
+    }
+    Ok(BooleanArray::from(out))
+}
+
+/// Byte-lex comparison `a ≤ b` with prefix-safe semantics.
+///
+/// Flux stores only the first 16 bytes of each block's min / max string;
+/// short keys that appear in a block may compare "less" than their
+/// true value if the comparand extends past the prefix. To stay
+/// conservative we treat `a ≤ b` as true whenever `a`'s bytes are a
+/// prefix of `b`'s bytes up to the shorter length.
+#[inline]
+fn prefix_lex_le(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().min(b.len());
+    let cmp = a[..n].cmp(&b[..n]);
+    match cmp {
+        std::cmp::Ordering::Less    => true,
+        std::cmp::Ordering::Equal   => true,  // prefix-equal — conservative
+        std::cmp::Ordering::Greater => false,
+    }
 }
 
 /// Element-wise logical AND of two boolean arrays (null → false).

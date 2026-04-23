@@ -1,9 +1,9 @@
 // Copyright 2024 FluxCompress Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-package io.fluxcompress.spark
+package com.datamariners.fluxcompress.spark
 
-import io.fluxcompress.FluxNative
+import com.datamariners.fluxcompress.FluxNative
 
 import org.apache.arrow.memory.BufferAllocator
 

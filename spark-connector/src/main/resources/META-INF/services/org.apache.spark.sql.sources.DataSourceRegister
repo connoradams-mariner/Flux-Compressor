@@ -1,1 +1,1 @@
-io.fluxcompress.spark.FluxDataSource
+com.datamariners.fluxcompress.spark.FluxDataSource

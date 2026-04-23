@@ -22,7 +22,7 @@ import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnVector, Columna
  * This file lives under `org.apache.spark.sql.*` on purpose — Spark's
  * `ArrowUtils` and `ArrowWriter` are `private[sql]` in Spark 3.5 so
  * only code in that package namespace can call them.  Everything the
- * connector exposes to users lives under `io.fluxcompress.spark.*`;
+ * connector exposes to users lives under `com.datamariners.fluxcompress.spark.*`;
  * this module is the thin Spark-private shim it calls into.
  */
 private[fluxcompress] object SparkArrowBridge {

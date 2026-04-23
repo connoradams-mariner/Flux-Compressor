@@ -74,6 +74,9 @@ pub mod segmenter;
 pub mod txn;
 pub mod dtype;
 pub mod dtype_router;
+pub mod null_bitmap;
+pub mod null_aware;
+pub mod string_zero_alloc;
 
 pub use traits::{LoomCompressor, LoomDecompressor, Predicate};
 pub use error::FluxError;

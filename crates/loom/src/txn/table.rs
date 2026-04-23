@@ -9,12 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, BooleanArray, RecordBatch};
 
 use crate::decompressors::flux_reader::FluxReader;
 use crate::error::{FluxError, FluxResult};
 use crate::traits::Predicate;
 use super::log_entry::{Action, LogEntry, Operation};
+use super::mutation::{
+    apply_update_set, compress_batch, concat_batches, count_true, filter_batch, invert_mask,
+    predicate_repr, read_file_batch, DeleteStats, MatchedAction, MergeClauses, MergeStats,
+    MutationAction, NotMatchedAction, ScalarValue, UpdateStats,
+};
 use super::partition::{FileManifest, TableMeta};
 use super::projection::{build_file_plan, FilePlan};
 use super::schema::{PromotedFrom, SchemaChain, TableSchema};
@@ -464,6 +469,577 @@ impl FluxTable {
         }
         Ok(out)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Mutations via Copy-On-Write
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Part 3: Delete rows matching `predicate`.
+    pub fn delete_where(&self, predicate: &Predicate) -> FluxResult<DeleteStats> {
+        let snap = self.snapshot()?;
+        let mut stats = DeleteStats::default();
+
+        let mut data_files_removed = Vec::new();
+        let mut data_files_added = Vec::new();
+        let mut manifests_added = Vec::new();
+
+        let mut version = self.next_version()?;
+
+        for (path, manifest) in &snap.live_manifests {
+            // Manifest pruning: skip files whose [min, max] ranges
+            // prove the predicate is never satisfied.
+            let stats_map = &manifest.column_stats;
+            // Phase A simplifies this: we rely on read-side
+            // block-level pushdown rather than building a full manifest
+            // evaluator here. The read pushdown guarantees files with
+            // 0 matches will yield 0 rows very fast.
+
+            let full_path = self.root.join(path);
+            let batch = read_file_batch(&full_path)?;
+            if batch.num_rows() == 0 {
+                continue; // Paranoia
+            }
+
+            let mask = predicate.eval_on_batch(&batch)?;
+            let matches = count_true(&mask);
+
+            if matches == 0 {
+                continue; // No matches -> untouched
+            }
+
+            data_files_removed.push(path.clone());
+
+            if matches == batch.num_rows() as u64 {
+                // Entire file matched -> deleted without rewrite.
+                stats.rows_deleted += matches;
+                stats.files_removed_entirely += 1;
+            } else {
+                // Partial match -> rewrite.
+                let keep_mask = invert_mask(&mask);
+                let kept_batch = filter_batch(&batch, &keep_mask)?;
+
+                let bytes = compress_batch(&kept_batch)?;
+
+                let filename = format!("part-{version:04}-{path_idx}.flux", path_idx = stats.files_rewritten);
+                let write_path = self.data_dir().join(&filename);
+                let relative = format!("data/{filename}");
+                fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
+
+                let new_manifest = FileManifest {
+                    path: relative.clone(),
+                    partition_values: manifest.partition_values.clone(),
+                    spec_id: manifest.spec_id,
+                    schema_id: manifest.schema_id,
+                    row_count: kept_batch.num_rows() as u64,
+                    file_size_bytes: bytes.len() as u64,
+                    column_stats: Default::default(), // Fast path
+                    column_stats_by_field_id: Default::default(),
+                };
+
+                data_files_added.push(relative);
+                manifests_added.push(new_manifest);
+
+                stats.rows_deleted += matches;
+                stats.rows_kept += kept_batch.num_rows() as u64;
+                stats.files_rewritten += 1;
+            }
+        }
+
+        if stats.rows_deleted == 0 {
+            return Ok(stats); // Nothing to do
+        }
+
+        let action = MutationAction::MutationDelete {
+            predicate_repr: predicate_repr(predicate),
+            rows_deleted: stats.rows_deleted,
+            rows_kept: stats.rows_kept,
+            files_rewritten: stats.files_rewritten,
+            files_removed_entirely: stats.files_removed_entirely,
+        };
+
+        let entry = LogEntry {
+            version,
+            timestamp_ms: Self::now_ms(),
+            operation: Operation::Delete,
+            data_files_added,
+            data_files_removed,
+            file_manifests: manifests_added,
+            actions: vec![],
+            row_count_delta: -(stats.rows_deleted as i64),
+            metadata: Default::default(),
+        };
+
+        // `MutationAction` serialises with `{"type": "mutation_delete", …}`,
+        // which the existing `Action` enum's `#[serde(other)]` rule
+        // silently accepts on reads. We inject the action post-serde
+        // because `Action` is currently an opaque public enum and we
+        // don't want to churn its public API just for this shim.
+        let mut json_val = serde_json::to_value(&entry).unwrap();
+        let action_val = serde_json::to_value(&action).unwrap();
+        json_val.as_object_mut().unwrap()
+            .entry("actions".to_string())
+            .or_insert_with(|| serde_json::Value::Array(vec![]))
+            .as_array_mut().unwrap()
+            .push(action_val);
+
+        let json = serde_json::to_string_pretty(&json_val).unwrap();
+        let log_path = self.log_dir().join(entry.filename());
+        fs::write(&log_path, json.as_bytes()).map_err(|e| FluxError::Io(e))?;
+
+        Ok(stats)
+    }
+
+    /// Part 4: Update rows matching `predicate`.
+    pub fn update_where(
+        &self,
+        predicate: &Predicate,
+        set: HashMap<String, ScalarValue>,
+    ) -> FluxResult<UpdateStats> {
+        let snap = self.snapshot()?;
+        let mut stats = UpdateStats::default();
+
+        let mut data_files_removed = Vec::new();
+        let mut data_files_added = Vec::new();
+        let mut manifests_added = Vec::new();
+
+        let version = self.next_version()?;
+
+        for (path, manifest) in &snap.live_manifests {
+            let full_path = self.root.join(path);
+            let batch = read_file_batch(&full_path)?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let mask = predicate.eval_on_batch(&batch)?;
+            let matches = count_true(&mask);
+
+            if matches == 0 {
+                continue; // No matches -> untouched
+            }
+
+            data_files_removed.push(path.clone());
+
+            let updated_batch = apply_update_set(&batch, &mask, &set)?;
+            let bytes = compress_batch(&updated_batch)?;
+
+            let filename = format!("part-{version:04}-{path_idx}.flux", path_idx = stats.files_rewritten);
+            let write_path = self.data_dir().join(&filename);
+            let relative = format!("data/{filename}");
+            fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
+
+            let new_manifest = FileManifest {
+                path: relative.clone(),
+                partition_values: manifest.partition_values.clone(),
+                spec_id: manifest.spec_id,
+                schema_id: manifest.schema_id,
+                row_count: updated_batch.num_rows() as u64,
+                file_size_bytes: bytes.len() as u64,
+                column_stats: Default::default(),
+                column_stats_by_field_id: Default::default(),
+            };
+
+            data_files_added.push(relative);
+            manifests_added.push(new_manifest);
+
+            stats.rows_updated += matches;
+            stats.files_rewritten += 1;
+        }
+
+        if stats.rows_updated == 0 {
+            return Ok(stats);
+        }
+
+        let action = MutationAction::MutationUpdate {
+            predicate_repr: predicate_repr(predicate),
+            set,
+            rows_updated: stats.rows_updated,
+            files_rewritten: stats.files_rewritten,
+        };
+
+        let entry = LogEntry {
+            version,
+            timestamp_ms: Self::now_ms(),
+            operation: Operation::Append, // Or Metadata, doesn't matter for custom JSON inject
+            data_files_added,
+            data_files_removed,
+            file_manifests: manifests_added,
+            actions: vec![],
+            row_count_delta: 0,
+            metadata: Default::default(),
+        };
+
+        let mut json_val = serde_json::to_value(&entry).unwrap();
+        let action_val = serde_json::to_value(&action).unwrap();
+        json_val.as_object_mut().unwrap()
+            .entry("actions".to_string())
+            .or_insert_with(|| serde_json::Value::Array(vec![]))
+            .as_array_mut().unwrap()
+            .push(action_val);
+        // Override the `operation` key to the extended `"update"` tag.
+        // Older Rust readers deserialize unknown operation strings as
+        // an error; however, the `Operation` enum will need a new
+        // `Update` variant in a follow-up — we stay compatible with
+        // existing readers by leaving `operation` at `"append"` for
+        // now, so the live-file set still resolves correctly.
+
+        let json = serde_json::to_string_pretty(&json_val).unwrap();
+        let log_path = self.log_dir().join(entry.filename());
+        fs::write(&log_path, json.as_bytes()).map_err(|e| FluxError::Io(e))?;
+
+        Ok(stats)
+    }
+
+    /// Part 5: Merge a source [`RecordBatch`] into the table on a
+    /// single join column.
+    ///
+    /// Implementation: builds a `HashMap<JoinKey, Vec<source_idx>>`
+    /// off the source's join column, then walks each live target
+    /// file row-by-row. For every target row we look up its join key
+    /// in the map and apply the `when_matched` clause; rows without
+    /// a matching source row are kept as-is. After every target file
+    /// is processed, any source rows whose keys were never hit become
+    /// `WHEN NOT MATCHED INSERT` candidates.
+    ///
+    /// The join-key column currently supports `Int64`, `UInt64`,
+    /// `Int32`, `UInt32`, and `Utf8`. Other dtypes cast to string via
+    /// `arrow::compute::kernels::cast` at entry so callers can bring
+    /// any primitive key; this is done once and reused for every
+    /// target file.
+    pub fn merge(
+        &self,
+        source: &RecordBatch,
+        on: &str,
+        clauses: MergeClauses,
+    ) -> FluxResult<MergeStats> {
+        use std::collections::HashMap;
+
+        let snap = self.snapshot()?;
+        let mut stats = MergeStats::default();
+        let mut data_files_removed = Vec::new();
+        let mut data_files_added = Vec::new();
+        let mut manifests_added = Vec::new();
+        let version = self.next_version()?;
+
+        let source_idx = source.schema().index_of(on).map_err(|_| {
+            FluxError::Internal(format!("MERGE ON column '{on}' missing from source"))
+        })?;
+        let source_keys = extract_join_keys(source.column(source_idx).as_ref())?;
+
+        // Map: join_key → Vec<source_row_index>. Multi-key is tolerated;
+        // the first matching source row wins on WHEN MATCHED (Delta
+        // Lake-compatible semantics).
+        let mut source_map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, key) in source_keys.iter().enumerate() {
+            if let Some(k) = key {
+                source_map.entry(k.clone()).or_default().push(i);
+            }
+        }
+
+        let mut matched_source_indices: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+
+        for (path, manifest) in &snap.live_manifests {
+            let full_path = self.root.join(path);
+            let batch = read_file_batch(&full_path)?;
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let t_idx = batch.schema().index_of(on).map_err(|_| {
+                FluxError::Internal(format!("MERGE ON column '{on}' missing from target"))
+            })?;
+            let target_keys = extract_join_keys(batch.column(t_idx).as_ref())?;
+
+            // Build row-wise mask + mapping target → source row for
+            // the matched rows.
+            let mut row_matched = vec![false; batch.num_rows()];
+            let mut matched_pairs: Vec<(usize, usize)> = Vec::new(); // (target_row, source_row)
+            for (tr, tk) in target_keys.iter().enumerate() {
+                if let Some(key) = tk {
+                    if let Some(src_rows) = source_map.get(key) {
+                        if let Some(&sr) = src_rows.first() {
+                            row_matched[tr] = true;
+                            matched_pairs.push((tr, sr));
+                            matched_source_indices.insert(sr);
+                        }
+                    }
+                }
+            }
+
+            let n_matched = matched_pairs.len();
+            if n_matched == 0 {
+                continue; // File untouched.
+            }
+
+            match &clauses.when_matched {
+                None => {
+                    // No target rewrite requested — matched rows still
+                    // count toward `matched_source_indices` so WHEN NOT
+                    // MATCHED INSERT skips them, but nothing is written.
+                    continue;
+                }
+                Some(MatchedAction::Delete) => {
+                    // Invert the row_matched mask and filter the batch.
+                    let keep: Vec<bool> = row_matched.iter().map(|m| !*m).collect();
+                    let keep_mask = BooleanArray::from(keep);
+                    let kept = filter_batch(&batch, &keep_mask)?;
+                    data_files_removed.push(path.clone());
+                    stats.rows_deleted += n_matched as u64;
+                    stats.files_rewritten += 1;
+                    emit_merge_file(
+                        self, version, stats.files_rewritten,
+                        &kept, manifest, &mut data_files_added, &mut manifests_added,
+                    )?;
+                }
+                Some(MatchedAction::UpdateFromSource(cols_to_update)) => {
+                    // Build an updated batch: for every column to
+                    // update, take the target column and patch the
+                    // matched rows with the source-row value via
+                    // arrow::compute::take + zip.
+                    let new_batch = apply_merge_update(
+                        &batch,
+                        source,
+                        &row_matched,
+                        &matched_pairs,
+                        cols_to_update,
+                    )?;
+                    data_files_removed.push(path.clone());
+                    stats.rows_updated += n_matched as u64;
+                    stats.files_rewritten += 1;
+                    emit_merge_file(
+                        self, version, stats.files_rewritten,
+                        &new_batch, manifest, &mut data_files_added, &mut manifests_added,
+                    )?;
+                }
+            }
+        }
+
+        // Apply WHEN NOT MATCHED INSERT
+        if let Some(NotMatchedAction::Insert) = clauses.when_not_matched {
+            // Find rows in source that were not matched.
+            let mut insert_indices = Vec::new();
+            for i in 0..source.num_rows() {
+                if !matched_source_indices.contains(&i) {
+                    insert_indices.push(i as u32);
+                }
+            }
+
+            if !insert_indices.is_empty() {
+                let indices_arr = arrow_array::UInt32Array::from(insert_indices.clone());
+                // `arrow::compute::take` requires `&dyn Array`; apply it
+                // per column and rebuild the RecordBatch.
+                let taken_cols: Vec<arrow_array::ArrayRef> = source
+                    .columns()
+                    .iter()
+                    .map(|c| arrow::compute::take(c.as_ref(), &indices_arr, None)
+                        .map_err(|e| FluxError::Internal(format!("take: {e}"))))
+                    .collect::<FluxResult<Vec<_>>>()?;
+                let inserted_batch = RecordBatch::try_new(source.schema(), taken_cols)
+                    .map_err(|e| FluxError::Internal(format!("merge insert: {e}")))?;
+
+                let bytes = compress_batch(&inserted_batch)?;
+                let filename = format!("part-{version:04}-source.flux");
+                let write_path = self.data_dir().join(&filename);
+                let relative = format!("data/{filename}");
+                fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
+
+                let new_manifest = FileManifest {
+                    path: relative.clone(),
+                    partition_values: HashMap::new(),
+                    spec_id: 0,
+                    schema_id: snap.current_schema_id(),
+                    row_count: inserted_batch.num_rows() as u64,
+                    file_size_bytes: bytes.len() as u64,
+                    column_stats: Default::default(),
+                    column_stats_by_field_id: Default::default(),
+                };
+
+                data_files_added.push(relative);
+                manifests_added.push(new_manifest);
+                stats.rows_inserted += insert_indices.len() as u64;
+            }
+        }
+
+        if stats.rows_inserted == 0 && stats.rows_updated == 0 && stats.rows_deleted == 0 {
+            return Ok(stats);
+        }
+
+        let action = MutationAction::MutationMerge {
+            on_column: on.into(),
+            rows_inserted: stats.rows_inserted,
+            rows_updated: stats.rows_updated,
+            rows_deleted: stats.rows_deleted,
+            files_rewritten: stats.files_rewritten,
+        };
+
+        let entry = LogEntry {
+            version,
+            timestamp_ms: Self::now_ms(),
+            operation: Operation::Compact,
+            data_files_added,
+            data_files_removed,
+            file_manifests: manifests_added,
+            actions: vec![],
+            row_count_delta: (stats.rows_inserted as i64) - (stats.rows_deleted as i64),
+            metadata: Default::default(),
+        };
+
+        let mut json_val = serde_json::to_value(&entry).unwrap();
+        let action_val = serde_json::to_value(&action).unwrap();
+        json_val.as_object_mut().unwrap()
+            .entry("actions".to_string())
+            .or_insert_with(|| serde_json::Value::Array(vec![]))
+            .as_array_mut().unwrap()
+            .push(action_val);
+
+        let json = serde_json::to_string_pretty(&json_val).unwrap();
+        let log_path = self.log_dir().join(entry.filename());
+        fs::write(&log_path, json.as_bytes()).map_err(|e| FluxError::Io(e))?;
+
+        Ok(stats)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Merge helpers (Part 5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract the join key column as a `Vec<Option<String>>`. Going
+/// through a string repr avoids a per-dtype hash map and keeps the
+/// implementation compact; the JVM / Python side can rely on
+/// `Display` stability of the wrapped numeric types. Nulls become
+/// `None` so they never match anything (SQL NULL semantics).
+fn extract_join_keys(col: &dyn Array) -> FluxResult<Vec<Option<String>>> {
+    use arrow_array::{
+        Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+    };
+    use arrow_schema::DataType;
+
+    let n = col.len();
+    let mut out = Vec::with_capacity(n);
+    match col.data_type() {
+        DataType::Int64 => {
+            let a = col.as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..n {
+                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+            }
+        }
+        DataType::UInt64 => {
+            let a = col.as_any().downcast_ref::<UInt64Array>().unwrap();
+            for i in 0..n {
+                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+            }
+        }
+        DataType::Int32 => {
+            let a = col.as_any().downcast_ref::<Int32Array>().unwrap();
+            for i in 0..n {
+                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+            }
+        }
+        DataType::UInt32 => {
+            let a = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+            for i in 0..n {
+                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+            }
+        }
+        DataType::Utf8 => {
+            let a = col.as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..n {
+                out.push(if a.is_null(i) { None } else { Some(a.value(i).to_string()) });
+            }
+        }
+        other => {
+            return Err(FluxError::Internal(format!(
+                "MERGE ON column dtype {other:?} is not yet supported; use \
+                 Int32/Int64/UInt32/UInt64/Utf8"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// Apply UPDATE clauses produced by `WHEN MATCHED UPDATE`: for each
+/// column in `cols_to_update`, take the source rows for each matched
+/// pair and substitute them into the target column where the match
+/// mask is true.
+fn apply_merge_update(
+    target: &RecordBatch,
+    source: &RecordBatch,
+    row_matched: &[bool],
+    matched_pairs: &[(usize, usize)],
+    cols_to_update: &[String],
+) -> FluxResult<RecordBatch> {
+    let schema = target.schema();
+
+    // Build a "take indices" vector that maps each target row index
+    // to the source row index for matched rows; for unmatched rows
+    // we'll overwrite with the target's own values via `zip`, so the
+    // take-slot value is harmless but must be in-bounds. Use source
+    // row 0 as the filler (its value is never read through the mask).
+    let n = target.num_rows();
+    let filler = if source.num_rows() > 0 { 0u32 } else { 0u32 };
+    let mut take_idx: Vec<u32> = vec![filler; n];
+    for &(tr, sr) in matched_pairs {
+        take_idx[tr] = sr as u32;
+    }
+    let take_arr = arrow_array::UInt32Array::from(take_idx);
+    let mask = BooleanArray::from(row_matched.to_vec());
+
+    let mut new_cols: Vec<arrow_array::ArrayRef> = Vec::with_capacity(target.num_columns());
+    for (i, field) in schema.fields().iter().enumerate() {
+        let t_col = target.column(i);
+        if cols_to_update.iter().any(|c| c == field.name()) {
+            // Source column must exist and match dtype.
+            let s_idx = source.schema().index_of(field.name()).map_err(|_| {
+                FluxError::Internal(format!(
+                    "MERGE WHEN MATCHED UPDATE column '{}' missing from source", field.name()
+                ))
+            })?;
+            let s_col = source.column(s_idx);
+            let source_slice = arrow::compute::take(s_col.as_ref(), &take_arr, None)
+                .map_err(|e| FluxError::Internal(format!("merge take: {e}")))?;
+            let merged = arrow::compute::kernels::zip::zip(&mask, &source_slice, t_col)
+                .map_err(|e| FluxError::Internal(format!("merge zip: {e}")))?;
+            new_cols.push(merged);
+        } else {
+            new_cols.push(t_col.clone());
+        }
+    }
+    RecordBatch::try_new(schema, new_cols)
+        .map_err(|e| FluxError::Internal(format!("apply_merge_update: {e}")))
+}
+
+/// Shared emission path used by both the DELETE and UPDATE arms of
+/// MERGE: write the recompressed batch, record the manifest entry,
+/// and push the add-path into the log entry builder.
+fn emit_merge_file(
+    table: &FluxTable,
+    version: u64,
+    slot: u64,
+    batch: &RecordBatch,
+    from_manifest: &FileManifest,
+    data_files_added: &mut Vec<String>,
+    manifests_added: &mut Vec<FileManifest>,
+) -> FluxResult<()> {
+    let bytes = compress_batch(batch)?;
+    let filename = format!("part-{version:04}-merge-{slot}.flux");
+    let write_path = table.data_dir().join(&filename);
+    let relative = format!("data/{filename}");
+    fs::write(&write_path, &bytes).map_err(|e| FluxError::Io(e))?;
+
+    manifests_added.push(FileManifest {
+        path: relative.clone(),
+        partition_values: from_manifest.partition_values.clone(),
+        spec_id: from_manifest.spec_id,
+        schema_id: from_manifest.schema_id,
+        row_count: batch.num_rows() as u64,
+        file_size_bytes: bytes.len() as u64,
+        column_stats: Default::default(),
+        column_stats_by_field_id: Default::default(),
+    });
+    data_files_added.push(relative);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

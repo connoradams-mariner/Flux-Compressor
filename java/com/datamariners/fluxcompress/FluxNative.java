@@ -1,7 +1,7 @@
 // Copyright 2024 FluxCompress Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-package io.fluxcompress;
+package com.datamariners.fluxcompress;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -30,10 +30,22 @@ import java.nio.ByteOrder;
 public final class FluxNative {
 
     static {
-        System.loadLibrary("flux_jni");
+        // Route library loading through the Scala-side bootstrapper so
+        // the bundled cdylib inside the connector JAR is extracted and
+        // registered without requiring the user to configure
+        // `java.library.path`. Falls back to the legacy
+        // `System.loadLibrary` behaviour on any failure so pre-0.5
+        // installs that still carry `-Djava.library.path=…` keep
+        // working.
+        try {
+            com.datamariners.fluxcompress.FluxNativeLoader$.MODULE$.ensureLoaded();
+        } catch (Throwable t) {
+            // Final fallback: classic `java.library.path`.
+            System.loadLibrary("flux_jni");
+        }
     }
 
-    // ── Prevent instantiation ────────────────────────────────────────────────
+    // ── Prevent instantiation ───────────────────────────────────────────────
     private FluxNative() {}
 
     // ── Core API ─────────────────────────────────────────────────────────────

@@ -76,7 +76,7 @@ def flux_compress_column(series):
     import jpype.imports
     if not jpype.isJVMStarted():
         jpype.startJVM(classpath=["path/to/flux-bridge.jar"])
-    from io.fluxcompress import FluxNative
+    from com.datamariners.fluxcompress import FluxNative
     import java.nio.ByteBuffer as ByteBuffer
 
     # Convert pandas Series → numpy int64 array (Arrow-native)
@@ -97,7 +97,7 @@ def flux_compress_column(series):
 def flux_decompress_column(series):
     """Decompress .flux bytes back to an array of long values."""
     import jpype, jpype.imports
-    from io.fluxcompress import FluxNative
+    from com.datamariners.fluxcompress import FluxNative
 
     result = []
     for flux_bytes in series:
@@ -119,7 +119,7 @@ def flux_compress_u128(hi_series, lo_series):
     columns (high word, low word) into .flux bytes with OutlierMap patching.
     """
     import jpype, jpype.imports
-    from io.fluxcompress import FluxNative
+    from com.datamariners.fluxcompress import FluxNative
 
     hi = hi_series.values.astype(np.int64).tolist()
     lo = lo_series.values.astype(np.int64).tolist()
@@ -210,7 +210,7 @@ def flux_decompress_s3(s3_key_series):
     """Read .flux files from S3 and decompress to long arrays."""
     import boto3
     import jpype, jpype.imports
-    from io.fluxcompress import FluxNative
+    from com.datamariners.fluxcompress import FluxNative
 
     s3 = boto3.client("s3")
     result = []
@@ -231,7 +231,7 @@ SCALA_EXAMPLE = '''
 // FluxCompress × Spark (Scala)
 // ============================================================
 // Add to build.sbt:
-//   libraryDependencies += "io.fluxcompress" % "flux-bridge" % "0.1.0"
+//   libraryDependencies += "com.datamariners.fluxcompress" % "flux-bridge" % "0.1.0"
 //
 // Add to spark-submit:
 //   --conf spark.driver.extraJavaOptions=-Djava.library.path=/path/to/target/release
@@ -240,7 +240,7 @@ SCALA_EXAMPLE = '''
 import org.apache.spark.sql.{SparkSession, DataFrame, functions => F}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.types._
-import io.fluxcompress.FluxNative
+import com.datamariners.fluxcompress.FluxNative
 import java.nio.{ByteBuffer, ByteOrder}
 
 

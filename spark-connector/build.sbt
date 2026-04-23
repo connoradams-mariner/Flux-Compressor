@@ -9,9 +9,57 @@
 // with `sbt package`, then put the produced JAR plus the `flux_jni`
 // cdylib on their Spark classpath / `java.library.path`.
 
-ThisBuild / organization := "io.fluxcompress"
-ThisBuild / version      := "0.1.0"
+// Maven groupId — based on the `datamariners.com` domain the author
+// controls. Sonatype policy requires the groupId reverse the FQDN of
+// a domain you own, so `com.datamariners.fluxcompress` is our
+// authoritative coordinate on Maven Central.
+ThisBuild / organization := "com.datamariners.fluxcompress"
+ThisBuild / organizationName := "Data Mariners"
+ThisBuild / organizationHomepage := Some(url("https://datamariners.com"))
+ThisBuild / homepage := Some(url("https://github.com/connoradams-mariner/Flux-Compressor"))
+ThisBuild / licenses := List(
+  "Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0")
+)
+ThisBuild / developers := List(
+  Developer(
+    id    = "connoradams-mariner",
+    name  = "Connor Adams",
+    email = "connor@example.com",
+    url   = url("https://github.com/connoradams-mariner"),
+  )
+)
+ThisBuild / scmInfo := Some(
+  ScmInfo(
+    url("https://github.com/connoradams-mariner/Flux-Compressor"),
+    "scm:git:git@github.com:connoradams-mariner/Flux-Compressor.git",
+  )
+)
+
+// Version is overridden by the release-maven workflow via
+// `set ThisBuild / version := "<tag>"`; the default here only matters
+// for local development.
+ThisBuild / version      := "0.5.0"
 ThisBuild / scalaVersion := "2.12.18"
+ThisBuild / crossScalaVersions := Seq("2.12.18", "2.13.12")
+
+// Maven Central routing — Sonatype Central Portal (central.sonatype.com).
+//
+// The new Portal replaced the legacy OSSRH (`s01.oss.sonatype.org`)
+// for accounts created after March 2024.  `sbt-sonatype` 3.11+ speaks
+// the Portal's new upload endpoint via `sonatypeCentralHost`.  The
+// staging-profile-name concept still applies: it must equal the
+// verified TLD root (`com.datamariners`), not the full coordinate.
+ThisBuild / publishTo := sonatypePublishToBundle.value
+ThisBuild / publishMavenStyle := true
+ThisBuild / sonatypeCredentialHost := Sonatype.sonatypeCentralHost
+ThisBuild / sonatypeProfileName := "com.datamariners"
+ThisBuild / credentials += Credentials(
+  "Sonatype Nexus Repository Manager",
+  "s01.oss.sonatype.org",
+  sys.env.getOrElse("SONATYPE_USERNAME", ""),
+  sys.env.getOrElse("SONATYPE_PASSWORD", ""),
+)
+ThisBuild / pgpPassphrase := sys.env.get("PGP_PASSPHRASE").map(_.toCharArray)
 
 // Spark 3.5 is the current LTS line.  We compile against `provided`
 // artefacts — Spark supplies its own copies at runtime.

@@ -7,7 +7,7 @@ Status: Phase H initial cut implemented in `spark-connector/`.
 - New `spark-connector/` sbt project (Scala 2.12, Spark 3.5 `provided`).
 - SPI registration under
   `META-INF/services/org.apache.spark.sql.sources.DataSourceRegister`
-  resolves `format("flux")` to `io.fluxcompress.spark.FluxDataSource`.
+  resolves `format("flux")` to `com.datamariners.fluxcompress.spark.FluxDataSource`.
 - `FluxSchemaConverter` — Spark `StructType` ↔ `TableSchema` JSON, using
   the existing `FluxDType` serde spellings (`"uint64"`, `"utf8"`,
   `"timestamp_micros"`, …).
@@ -79,7 +79,7 @@ spark-submit \
 - **Why split the bridge across two packages?** Spark's Arrow
   integration (`ArrowUtils`, `ArrowWriter`) is `private[sql]`, so
   `SparkArrowBridge` has to live under `org.apache.spark.sql.*`.
-  Everything user-visible lives under `io.fluxcompress.spark.*` and
+  Everything user-visible lives under `com.datamariners.fluxcompress.spark.*` and
   only calls the bridge across the module boundary — same trick that
   Delta Lake and Iceberg use.
 - **Why hand-rolled JSON in `FluxSchemaConverter`?** Spark already

@@ -1,0 +1,68 @@
+# Publish Rust crates to crates.io on version tags.
+#
+# Trigger: tags of the form `vX.Y.Z`.
+#
+# Order matters: `loom` is the root library, `flux-jni-bridge` depends on
+# `loom`, and `fluxcapacitor` depends on `loom`. We publish them in
+# dependency order and sleep a few seconds between each so the crates.io
+# index has time to catch up — `cargo publish` will otherwise fail with
+# "no matching package" for transitive dependents.
+#
+# Required secrets:
+#   * CARGO_REGISTRY_TOKEN  (https://crates.io/settings/tokens)
+
+name: release-crates
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Confirm we're publishing from a clean tree at a tagged commit.
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          RAW=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="loom") | .version')
+          WORKSPACE_VER="v$RAW"
+          echo "Tag: $TAG"
+          echo "Workspace: $WORKSPACE_VER"
+          if [ "$TAG" != "$WORKSPACE_VER" ]; then
+            echo "::error::Tag $TAG does not match workspace version $WORKSPACE_VER"
+            exit 1
+          fi
+
+      - name: Dry-run publish loom
+        run: cargo publish -p loom --dry-run
+
+      - name: Publish loom
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p loom
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish flux-jni-bridge
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # The JNI bridge is optional for most downstream users; publishing
+        # it lets Scala connector maintainers pull it directly.
+        run: cargo publish -p flux-jni-bridge --allow-dirty
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish fluxcapacitor
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p fluxcapacitor --allow-dirty

@@ -21,12 +21,18 @@
 mod log_entry;
 mod snapshot;
 mod table;
+pub mod mutation;
 pub mod partition;
 pub mod optimizer;
 pub mod schema;
 pub mod projection;
+pub mod wal;
 
 pub use log_entry::{Action, LogEntry, Operation};
+pub use mutation::{
+    DeleteStats, MergeClauses, MergeStats, MatchedAction, MutationAction,
+    NotMatchedAction, ScalarValue, UpdateStats,
+};
 pub use snapshot::Snapshot;
 pub use table::{FluxTable, FluxScan, EvolveOptions};
 pub use partition::{
@@ -35,3 +41,4 @@ pub use partition::{
 };
 pub use schema::{DefaultValue, PromotedFrom, SchemaChain, SchemaField, TableSchema};
 pub use projection::{build_file_plan, ColumnPlan, FilePlan};
+pub use wal::{WalEntry, WalLog, LogFormat};

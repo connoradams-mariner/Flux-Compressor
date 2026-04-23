@@ -126,7 +126,7 @@ For production Spark jobs written in Scala, use the JNI bridge directly to
 avoid the Python overhead:
 
 ```scala
-import io.fluxcompress.FluxNative
+import com.datamariners.fluxcompress.FluxNative
 
 val fluxCompress = udf { values: Seq[Long] =>
   val n   = values.length
@@ -139,6 +139,6 @@ val fluxCompress = udf { values: Seq[Long] =>
 df.withColumn("id_flux", fluxCompress(collect_list($"user_id")))
 ```
 
-See [`FluxNative.java`](../../java/io/fluxcompress/FluxNative.java) for the
+See [`FluxNative.java`](../../java/com/datamariners/fluxcompress/FluxNative.java) for the
 complete Java API including the u128 dual-register bridge for
 `DECIMAL(38,0)` / large `SUM` aggregation results.

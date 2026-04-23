@@ -103,6 +103,252 @@ fn print_row(name: &str, size: usize, arrow_bytes: usize, c_ms: f64, d_ms: f64) 
 
 // ── Schema mirror of the Databricks test ─────────────────────────────────
 
+/// Public re-export used by the `compare_bench` module so all three
+/// codecs run on the exact same RecordBatch.
+pub fn build_batch_for_compare(rows: usize) -> RecordBatch { build_batch(rows) }
+
+/// Public re-export of the arrow-byte estimator for the compare-bench.
+pub fn estimate_arrow_bytes_for_compare(batch: &RecordBatch) -> usize {
+    estimate_arrow_bytes(batch)
+}
+
+/// Float-heavy RecordBatch: 10 Float64 columns with realistic numeric
+/// distributions (prices, coordinates, rates, sensor readings) plus
+/// 2 identifier columns and 1 timestamp.  Mirrors scientific /
+/// financial / IoT workloads.
+///
+/// Floats are historically Flux's weakest dtype vs Parquet on the
+/// decompression side — Parquet snappy decodes Float64 at ~2.3 GB/s
+/// via byte-copy whereas our BitSlab + OutlierMap pipeline needs a
+/// few extra steps. This bench is how we measure improvements there.
+pub fn build_float_heavy_batch(rows: usize) -> RecordBatch {
+    use arrow_array::{Float64Array, Int64Array, TimestampMillisecondArray};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+
+    let mut s: u64 = 0xDEAD_F107_BEEF_1234_u64;
+    let mut rnd = || {
+        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        s
+    };
+    let randf = |r: u64, scale: f64| (r as f64 / u64::MAX as f64) * scale;
+
+    // Identifier columns.
+    let id: Vec<i64> = (0..rows as i64).collect();
+    let user_id: Vec<i64> = (0..rows).map(|_| (rnd() % 5_000_000) as i64).collect();
+
+    // Temporal.
+    let base_ts = 1_700_000_000_000_i64;
+    let created_at: Vec<i64> = (0..rows as i64).map(|i| base_ts + i * 1000).collect();
+
+    // ── 10 Float64 columns with realistic distributions ─────────────
+
+    // price: 2 decimal places, [$0, $10000) — classic ALP target.
+    let price: Vec<f64> = (0..rows).map(|_| {
+        ((rnd() % 1_000_000) as f64) / 100.0
+    }).collect();
+
+    // latitude / longitude: 6 decimal places (typical GPS) — ALP target.
+    let latitude: Vec<f64> = (0..rows).map(|_| {
+        (25_000_000_i64 + (rnd() % 25_000_000) as i64) as f64 / 1_000_000.0
+    }).collect();
+    let longitude: Vec<f64> = (0..rows).map(|_| {
+        (-125_000_000_i64 + (rnd() % 60_000_000) as i64) as f64 / 1_000_000.0
+    }).collect();
+
+    // cpu_usage, memory_usage: bounded [0,1] with 4 decimals — ALP target.
+    let cpu_usage: Vec<f64> = (0..rows).map(|_| {
+        ((rnd() % 10_000) as f64) / 10_000.0
+    }).collect();
+    let memory_usage: Vec<f64> = (0..rows).map(|_| {
+        ((rnd() % 10_000) as f64) / 10_000.0
+    }).collect();
+
+    // temperature: Celsius with 1 decimal, [-40, 60].
+    let temperature: Vec<f64> = (0..rows).map(|_| {
+        -40.0 + ((rnd() % 1000) as f64) / 10.0
+    }).collect();
+
+    // latency_ms: lognormal-ish, heavy tail — bad case for ALP (full entropy).
+    let latency_ms: Vec<f64> = (0..rows).map(|_| {
+        let r = randf(rnd(), 1.0).max(1e-9);
+        (-r.ln()) * 50.0
+    }).collect();
+
+    // revenue: 2 decimals, long tail up to $100M.
+    let revenue: Vec<f64> = (0..rows).map(|_| {
+        ((rnd() % 10_000_000_000) as f64) / 100.0
+    }).collect();
+
+    // wind_speed: 1 decimal place, 0..200 km/h.
+    let wind_speed: Vec<f64> = (0..rows).map(|_| {
+        ((rnd() % 2000) as f64) / 10.0
+    }).collect();
+
+    // signal_strength: dBm-like, -120..0 with 1 decimal.
+    let signal_strength: Vec<f64> = (0..rows).map(|_| {
+        -120.0 + ((rnd() % 1200) as f64) / 10.0
+    }).collect();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("user_id", DataType::Int64, false),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("latitude", DataType::Float64, false),
+        Field::new("longitude", DataType::Float64, false),
+        Field::new("cpu_usage", DataType::Float64, false),
+        Field::new("memory_usage", DataType::Float64, false),
+        Field::new("temperature", DataType::Float64, false),
+        Field::new("latency_ms", DataType::Float64, false),
+        Field::new("revenue", DataType::Float64, false),
+        Field::new("wind_speed", DataType::Float64, false),
+        Field::new("signal_strength", DataType::Float64, false),
+    ]));
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(id)),
+        Arc::new(Int64Array::from(user_id)),
+        Arc::new(TimestampMillisecondArray::from(created_at)),
+        Arc::new(Float64Array::from(price)),
+        Arc::new(Float64Array::from(latitude)),
+        Arc::new(Float64Array::from(longitude)),
+        Arc::new(Float64Array::from(cpu_usage)),
+        Arc::new(Float64Array::from(memory_usage)),
+        Arc::new(Float64Array::from(temperature)),
+        Arc::new(Float64Array::from(latency_ms)),
+        Arc::new(Float64Array::from(revenue)),
+        Arc::new(Float64Array::from(wind_speed)),
+        Arc::new(Float64Array::from(signal_strength)),
+    ];
+    RecordBatch::try_new(schema, columns).unwrap()
+}
+
+/// String-heavy RecordBatch: 10 string columns with realistic event-log
+/// cardinalities, plus 2 identifier columns and one timestamp.  This
+/// schema exercises the adaptive string pipeline (FSST, front-coding,
+/// dict, cross-column groups) much more than [`build_batch`] and is a
+/// better proxy for log / event / clickstream workloads.
+pub fn build_string_heavy_batch(rows: usize) -> RecordBatch {
+    use arrow_array::{Int64Array, StringArray, TimestampMillisecondArray};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+
+    let mut s: u64 = 0xDECAF_BAD_C0DE_1234_u64;
+    let mut rnd = || {
+        s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+        s
+    };
+
+    // Identifier columns.
+    let id: Vec<i64> = (0..rows as i64).collect();
+    let user_id: Vec<i64> = (0..rows).map(|_| (rnd() % 5_000_000) as i64).collect();
+
+    // Temporal.
+    let base_ts = 1_700_000_000_000_i64;
+    let created_at: Vec<i64> = (0..rows as i64).map(|i| base_ts + i * 1000).collect();
+
+    // ── 10 string columns with realistic cardinalities ──────────────
+
+    // Low-card enums — target dict+loom.
+    let countries = ["US","CA","UK","FR","DE","IT","ES","JP","AU","BR","IN","CN"];
+    let country: Vec<&str> = (0..rows)
+        .map(|_| countries[(rnd() as usize) % countries.len()]).collect();
+
+    let devices = ["mobile","desktop","tablet","tv","console","watch"];
+    let device_type: Vec<&str> = (0..rows)
+        .map(|_| devices[(rnd() as usize) % devices.len()]).collect();
+
+    let statuses = ["active","pending","suspended","deleted","banned","invited"];
+    let status: Vec<&str> = (0..rows)
+        .map(|_| statuses[(rnd() as usize) % statuses.len()]).collect();
+
+    let methods = ["GET","POST","PUT","DELETE","PATCH","HEAD","OPTIONS"];
+    let http_method: Vec<&str> = (0..rows)
+        .map(|_| methods[(rnd() as usize) % methods.len()]).collect();
+
+    let severities = ["DEBUG","INFO","WARN","ERROR","FATAL"];
+    let log_level: Vec<&str> = (0..rows)
+        .map(|_| severities[(rnd() as usize) % severities.len()]).collect();
+
+    // Medium cardinality — dict wins big.
+    let categories: Vec<String> = (0..500).map(|i| format!("category_{i:04}")).collect();
+    let category: Vec<String> = (0..rows)
+        .map(|_| categories[(rnd() as usize) % categories.len()].clone())
+        .collect();
+
+    // High-card email-like — FSST target (shared suffix tails).
+    let domains = ["@example.com","@gmail.com","@yahoo.com","@corp.co","@enterprise.net","@mail.org"];
+    let email: Vec<String> = (0..rows).map(|i| {
+        format!("user_{}_{}{}", i, (rnd() % 9999), domains[(rnd() as usize) % domains.len()])
+    }).collect();
+
+    // URLs — FSST target (shared host + paths).
+    let paths = ["/api/v1/users","/api/v2/orders","/healthz","/metrics",
+                 "/static/img","/api/v1/products","/api/v2/cart"];
+    let request_path: Vec<String> = (0..rows).map(|i| {
+        format!("https://api.example.com{}/{}", paths[(rnd() as usize) % paths.len()], i)
+    }).collect();
+
+    // User agents — shared Mozilla / Chrome prefixes (FSST + dict hybrid).
+    let ua_prefixes = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0) AppleWebKit/605.1.15",
+    ];
+    let user_agent: Vec<String> = (0..rows).map(|_| {
+        format!("{} Chrome/{}.0.0.0", ua_prefixes[(rnd() as usize) % ua_prefixes.len()],
+                100 + (rnd() % 20))
+    }).collect();
+
+    // Free-text log message — mostly unique suffixes, some shared prefixes.
+    let log_prefixes = [
+        "Request completed with status",
+        "Cache hit for key",
+        "Processing background job",
+        "Auth check passed for user",
+        "Retry scheduled due to",
+    ];
+    let message: Vec<String> = (0..rows).map(|i| {
+        format!("{} {} in {}ms",
+                log_prefixes[(rnd() as usize) % log_prefixes.len()],
+                i,
+                rnd() % 500)
+    }).collect();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("user_id", DataType::Int64, false),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("country", DataType::Utf8, false),
+        Field::new("device_type", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("http_method", DataType::Utf8, false),
+        Field::new("log_level", DataType::Utf8, false),
+        Field::new("category", DataType::Utf8, false),
+        Field::new("email", DataType::Utf8, false),
+        Field::new("request_path", DataType::Utf8, false),
+        Field::new("user_agent", DataType::Utf8, false),
+        Field::new("message", DataType::Utf8, false),
+    ]));
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(id)),
+        Arc::new(Int64Array::from(user_id)),
+        Arc::new(TimestampMillisecondArray::from(created_at)),
+        Arc::new(StringArray::from(country)),
+        Arc::new(StringArray::from(device_type)),
+        Arc::new(StringArray::from(status)),
+        Arc::new(StringArray::from(http_method)),
+        Arc::new(StringArray::from(log_level)),
+        Arc::new(StringArray::from(category.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        Arc::new(StringArray::from(email.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        Arc::new(StringArray::from(request_path.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        Arc::new(StringArray::from(user_agent.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        Arc::new(StringArray::from(message.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+    ];
+    RecordBatch::try_new(schema, columns).unwrap()
+}
+
 fn build_batch(rows: usize) -> RecordBatch {
     // Pseudo-random helpers.
     let mut s: u64 = 0xCAFE_F00D_BEEF_1234;

@@ -37,7 +37,7 @@
 //!
 //! ## Java API
 //! ```java
-//! package io.fluxcompress;
+//! package com.datamariners.fluxcompress;
 //!
 //! public class FluxNative {
 //!     static { System.loadLibrary("flux_jni"); }
@@ -173,7 +173,7 @@ mod table_registry;
 /// `data` must be a `DirectByteBuffer` holding `valueCount` little-endian u64
 /// values (8 bytes each).  Returns the compressed `.flux` bytes.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_compress(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_compress(
     mut env: JNIEnv,
     _class: JClass,
     data: JByteBuffer,
@@ -240,7 +240,7 @@ fn compress_direct_buffer(
 /// Accepts two parallel `long[]` arrays representing the high and low 64 bits
 /// of each u128 value.  Reconstructs full `u128` in Rust and compresses.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_compressU128(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_compressU128(
     mut env: JNIEnv,
     _class: JClass,
     hi_arr: JLongArray,
@@ -299,7 +299,7 @@ fn compress_u128_arrays(
 /// Decompresses a flux block and returns the values as a flat byte array of
 /// little-endian u64 values (8 bytes each).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_decompress(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_decompress(
     mut env: JNIEnv,
     _class: JClass,
     flux_data: JByteArray,
@@ -345,7 +345,7 @@ fn decompress_to_u64_bytes(
 /// `long[2][]` array where `result[0]` is the high words and `result[1]` is
 /// the low words.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_decompressU128(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_decompressU128(
     mut env: JNIEnv,
     _class: JClass,
     flux_data: JByteArray,
@@ -412,7 +412,7 @@ fn decompress_u128_pairs(
 /// - `"archive"` — Zstd post-pass (best ratio, higher CPU)
 /// - `"brotli"` — Brotli for text columns, Zstd for numeric
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_compressTable(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_compressTable(
     mut env: JNIEnv,
     _class: JClass,
     ipc_batch: JByteArray,
@@ -450,7 +450,7 @@ fn compress_table_inner(
 /// Decompresses a `.flux` byte payload and returns the result as an
 /// Arrow IPC *stream* that the Java side reads with `ArrowStreamReader`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_decompressTable(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_decompressTable(
     mut env: JNIEnv,
     _class: JClass,
     flux_data: JByteArray,
@@ -487,7 +487,7 @@ fn decompress_table_inner(
 /// Opens (or creates) a FluxTable at `path` and returns an opaque handle.
 /// The handle is valid until `tableClose` is called.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableOpen(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableOpen(
     mut env: JNIEnv,
     _class: JClass,
     path: JString,
@@ -516,7 +516,7 @@ fn table_open_inner(
 /// Appends pre-compressed `.flux` bytes to the open table and returns the
 /// new transaction log version number.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableAppend(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableAppend(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -549,7 +549,7 @@ fn table_append_inner(
 /// Arrow IPC *stream* payload.  If the table has no live files, returns an
 /// empty byte array.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableScan(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableScan(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -628,7 +628,7 @@ fn scan_all_files(
 /// exact format).  Returns the transaction log version of the
 /// schema-change entry.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableEvolve(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableEvolve(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -662,7 +662,7 @@ fn table_evolve_inner(
 /// invalid after this call; passing it to any other JNI function will throw
 /// `IllegalArgumentException`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableClose(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableClose(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
@@ -681,7 +681,7 @@ pub extern "system" fn Java_io_fluxcompress_FluxNative_tableClose(
 /// Returns the latest committed transaction log version number, or `-1` when
 /// the table has no entries yet.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_io_fluxcompress_FluxNative_tableCurrentVersion(
+pub extern "system" fn Java_com_datamariners_fluxcompress_FluxNative_tableCurrentVersion(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,

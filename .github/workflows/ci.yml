@@ -1,0 +1,100 @@
+# Continuous integration for FluxCompress.
+#
+# Runs on every push and pull-request to `main`:
+#   * Rust: `cargo fmt --check`, `cargo clippy`, `cargo test --lib`.
+#   * Scala: `sbt compile + test` for the Spark DataSource V2 connector
+#     (unit tests; the JNI-dependent e2e tests skip cleanly).
+#   * Python: `maturin develop` + `pytest python/tests/`.
+#
+# Keep this file narrow — release pipelines live in separate workflows
+# so a failing release doesn't block day-to-day PRs.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # Cancel in-flight CI runs for the same ref when a new push lands.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        # `-D warnings` stays out of CI for now; the crate has pre-existing
+        # lints we clean up in a separate pass.
+        run: cargo clippy --workspace --all-targets --no-deps
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      - name: Test
+        run: cargo test --workspace --lib --tests
+
+  scala:
+    name: Scala (Spark connector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: sbt/setup-sbt@v1
+      - name: Cache sbt / Coursier / Ivy
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sbt
+            ~/.ivy2/cache
+            ~/.cache/coursier
+          key: sbt-${{ hashFiles('spark-connector/**/*.sbt', 'spark-connector/project/**/*.sbt', 'spark-connector/project/build.properties') }}
+
+      - name: Compile connector
+        working-directory: spark-connector
+        run: sbt -Dsbt.color=always -batch compile
+
+      - name: Test connector
+        working-directory: spark-connector
+        # The e2e round-trip test auto-skips when `flux_jni` is not on
+        # `java.library.path`; the schema-converter tests always run.
+        run: sbt -Dsbt.color=always -batch test
+
+  python:
+    name: Python (PyO3 bindings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install maturin + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest pyarrow polars
+      - name: Build Python extension (develop mode)
+        run: maturin develop --release -m crates/python/Cargo.toml
+      - name: Run Python tests
+        run: pytest python/tests/ -v

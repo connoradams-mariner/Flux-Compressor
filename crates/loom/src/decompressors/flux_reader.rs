@@ -26,6 +26,8 @@ use arrow_array::{
     StructArray, ListArray,
 };
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use arrow_buffer::Buffer;
+use arrow::array::ArrayDataBuilder;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -1136,8 +1138,77 @@ fn reconstruct_decimal128(values: &[u128]) -> FluxResult<ArrayRef> {
 ///
 /// This is the hot path: avoids the `u128 → u64` conversion for types that
 /// were already decompressed to `u64` via [`decompress_block_to_u64`].
+///
+/// ## Zero-copy same-width reconstruction
+///
+/// For [`FluxDType::Float64`], [`FluxDType::Int64`], and
+/// [`FluxDType::UInt64`] — every target type whose Arrow buffer has the
+/// same bit-width as the source `u64` — we hand the `Vec<u64>` directly
+/// to Arrow's [`Buffer::from_vec`], which takes ownership without
+/// copying.  The output array is then wrapped around that buffer via
+/// [`ArrayDataBuilder`] at the target dtype.  No per-value
+/// `f64::from_bits` / `as i64` / byte-copy passes are needed because
+/// those conversions are pure bit-casts at the Arrow layer — the
+/// in-memory representation of
+///  - `Vec<u64>` (8 bytes per element, LE on every supported target),
+///  - `Buffer` with 8-byte alignment,
+///  - Arrow `Float64` / `Int64` / `UInt64` value buffers,
+/// are byte-identical.  This eliminates the pure-entropy Float64
+/// decompression bottleneck that used to show up as a 5× Parquet
+/// advantage in `dtype-bench`.
+///
+/// Types narrower than u64 (UInt32, Int16, etc.) still go through the
+/// `reconstruct_array_u64_ref` path because they need width
+/// truncation; Float32 does a same-width cast but the source is u64,
+/// not u32, so we widen/narrow through the ref path today.
 pub fn reconstruct_array_u64(values: Vec<u64>, dtype_tag: FluxDType) -> FluxResult<ArrayRef> {
-    reconstruct_array_u64_ref(&values, dtype_tag)
+    match dtype_tag {
+        FluxDType::UInt64 => zero_copy_u64_buffer::<u64>(values, DataType::UInt64),
+        FluxDType::Int64  => zero_copy_u64_buffer::<u64>(values, DataType::Int64),
+        FluxDType::Float64 => zero_copy_u64_buffer::<u64>(values, DataType::Float64),
+        FluxDType::Date64 => zero_copy_u64_buffer::<u64>(values, DataType::Date64),
+        FluxDType::TimestampSecond =>
+            zero_copy_u64_buffer::<u64>(values, DataType::Timestamp(arrow_schema::TimeUnit::Second, None)),
+        FluxDType::TimestampMillis =>
+            zero_copy_u64_buffer::<u64>(values, DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None)),
+        FluxDType::TimestampMicros =>
+            zero_copy_u64_buffer::<u64>(values, DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None)),
+        FluxDType::TimestampNanos =>
+            zero_copy_u64_buffer::<u64>(values, DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, None)),
+
+        // Narrower / non-same-width types still need the
+        // per-value width cast, so fall through to the borrowed path.
+        _ => reconstruct_array_u64_ref(&values, dtype_tag),
+    }
+}
+
+/// Build an [`ArrayRef`] of the given `target_dtype` by handing the
+/// caller's `Vec<u64>` straight to Arrow's [`Buffer`] without any
+/// per-value copy.
+///
+/// # Safety
+/// - `target_dtype` **must** be an 8-byte-wide primitive (`UInt64`,
+///   `Int64`, `Float64`, `Date64`, `Timestamp(*, None)`). The caller
+///   enforces this via the outer `match` in
+///   [`reconstruct_array_u64`]; passing anything else triggers an
+///   internal assertion at [`ArrayData::validate_data`] time.
+/// - The u64 bit pattern in `values` must be a valid bit pattern for
+///   the destination dtype (trivially true for integers; for floats
+///   any bit pattern is a valid `f64` including NaN / sub-normals,
+///   which Arrow tolerates).
+fn zero_copy_u64_buffer<T>(values: Vec<u64>, target_dtype: DataType) -> FluxResult<ArrayRef> {
+    let len = values.len();
+    // `Buffer::from_vec::<u64>` consumes the Vec and reuses its
+    // allocation; no copy.  The resulting Buffer is 8-byte aligned
+    // which matches every supported 64-bit primitive's Arrow
+    // requirement.
+    let buf = Buffer::from_vec(values);
+    let data = ArrayDataBuilder::new(target_dtype)
+        .len(len)
+        .add_buffer(buf)
+        .build()
+        .map_err(FluxError::Arrow)?;
+    Ok(arrow_array::make_array(data))
 }
 
 /// Reconstruct a typed Arrow array from a borrowed `&[u64]` slice.
@@ -1237,6 +1308,59 @@ mod tests {
         ]));
         let arr = Arc::new(UInt64Array::from(values));
         RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
+
+    #[test]
+    fn zero_copy_float64_round_trip() {
+        // Build a `Vec<u64>` that represents known `f64` bit patterns,
+        // reconstruct it through the zero-copy path, and verify every
+        // value decodes back to the expected `f64`.
+        let originals: Vec<f64> = vec![
+            0.0, 1.5, -3.14, 1e308, -1e-308,
+            f64::INFINITY, f64::NEG_INFINITY, f64::MIN, f64::MAX,
+            12345.6789,
+        ];
+        let as_bits: Vec<u64> = originals.iter().map(|v| v.to_bits()).collect();
+
+        let arr = reconstruct_array_u64(as_bits, FluxDType::Float64).unwrap();
+        let arr = arr.as_any().downcast_ref::<Float64Array>().expect("Float64Array");
+        assert_eq!(arr.len(), originals.len());
+        for (i, expected) in originals.iter().enumerate() {
+            // Compare bit patterns so NaN / signed-zero cases are
+            // exact (not `==`-sensitive).
+            assert_eq!(arr.value(i).to_bits(), expected.to_bits(), "row {i}");
+        }
+    }
+
+    #[test]
+    fn zero_copy_int64_uint64_round_trip() {
+        let values: Vec<u64> = vec![0, 1, u64::MAX, 42, 1 << 40];
+
+        let u = reconstruct_array_u64(values.clone(), FluxDType::UInt64).unwrap();
+        let u = u.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(u.values().as_ref(), values.as_slice());
+
+        let i = reconstruct_array_u64(values.clone(), FluxDType::Int64).unwrap();
+        let i = i.as_any().downcast_ref::<Int64Array>().unwrap();
+        for (idx, &v) in values.iter().enumerate() {
+            assert_eq!(i.value(idx), v as i64, "row {idx}");
+        }
+    }
+
+    #[test]
+    fn narrow_types_still_work_through_ref_path() {
+        // UInt32 goes through the truncating `reconstruct_array_u64_ref`
+        // path — make sure the new zero-copy dispatch didn't regress it.
+        let values: Vec<u64> = vec![0, 1, 2, u32::MAX as u64 + 1, u64::MAX];
+        let arr = reconstruct_array_u64(values, FluxDType::UInt32).unwrap();
+        let arr = arr.as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(arr.value(0), 0);
+        assert_eq!(arr.value(1), 1);
+        assert_eq!(arr.value(2), 2);
+        // u32::MAX + 1 wraps to 0 under `as u32`.
+        assert_eq!(arr.value(3), 0);
+        // u64::MAX wraps to u32::MAX under `as u32`.
+        assert_eq!(arr.value(4), u32::MAX);
     }
 
     #[test]

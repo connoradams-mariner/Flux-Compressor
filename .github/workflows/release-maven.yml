@@ -1,0 +1,136 @@
+# Publish `com.datamariners.fluxcompress:flux-spark-connector_2.12` to Maven Central
+# on version tags.
+#
+# Trigger: tags of the form `vX.Y.Z`.
+#
+# Databricks runs Spark 3.5 against OpenJDK 17 today, so we ship a
+# single Scala-2.12 artefact compiled with that toolchain. The
+# workflow:
+#
+#   1. Cross-builds the `flux_jni` cdylib on Linux x86_64, Linux
+#      aarch64, macOS x86_64, macOS arm64, and Windows x86_64 so the
+#      JAR can resolve `System.loadLibrary("flux_jni")` on every cloud
+#      the user might run Spark on.
+#   2. Bundles the native libraries into
+#      `spark-connector/src/main/resources/native/<os>-<arch>/` so the
+#      JVM-side loader can extract them at runtime (see
+#      `FluxNativeLoader` in the connector).
+#   3. Uses `sbt publishSigned` with PGP + Sonatype OSSRH to push the
+#      signed artefact to Maven Central; the JAR appears at
+#      `com.datamariners.fluxcompress:flux-spark-connector_2.12:<version>`.
+#
+# Required secrets:
+#   * MAVEN_USERNAME   (Sonatype OSSRH user)
+#   * MAVEN_PASSWORD   (Sonatype OSSRH token)
+#   * PGP_SECRET       (base64-encoded armoured PGP private key)
+#   * PGP_PASSPHRASE   (passphrase for the PGP key)
+
+name: release-maven
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-native:
+    name: Build cdylib — ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: libflux_jni.so
+          - label: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: libflux_jni.so
+            cross: true
+          - label: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            artifact: libflux_jni.dylib
+          - label: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            artifact: libflux_jni.dylib
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: flux_jni.dll
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross (Linux aarch64 only)
+        if: matrix.cross
+        run: cargo install cross --locked
+      - name: Build cdylib (cross)
+        if: matrix.cross
+        run: cross build --release -p flux-jni-bridge --target ${{ matrix.target }}
+      - name: Build cdylib (native)
+        if: '!matrix.cross'
+        run: cargo build --release -p flux-jni-bridge --target ${{ matrix.target }}
+      - name: Upload cdylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  publish:
+    name: Publish to Maven Central
+    needs: build-native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Download all cdylib artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: native-libs
+
+      # Stage the native libs into the JAR resource path. The Scala
+      # connector's `FluxNativeLoader` (added alongside this workflow)
+      # extracts them at runtime based on `os.name` + `os.arch`.
+      - name: Stage natives into JAR resources
+        run: |
+          BASE=spark-connector/src/main/resources/native
+          mkdir -p $BASE/linux-x86_64 $BASE/linux-aarch64
+          mkdir -p $BASE/darwin-x86_64 $BASE/darwin-aarch64
+          mkdir -p $BASE/windows-x86_64
+          cp native-libs/native-linux-x86_64/libflux_jni.so    $BASE/linux-x86_64/
+          cp native-libs/native-linux-aarch64/libflux_jni.so   $BASE/linux-aarch64/
+          cp native-libs/native-macos-x86_64/libflux_jni.dylib $BASE/darwin-x86_64/
+          cp native-libs/native-macos-arm64/libflux_jni.dylib  $BASE/darwin-aarch64/
+          cp native-libs/native-windows-x86_64/flux_jni.dll    $BASE/windows-x86_64/
+          ls -R $BASE
+
+      - name: Import PGP key
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: |
+          mkdir -p ~/.gnupg
+          echo "$PGP_SECRET" | base64 -d | gpg --batch --import
+
+      - name: Publish signed artefact
+        working-directory: spark-connector
+        env:
+          SONATYPE_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+          PGP_PASSPHRASE:    ${{ secrets.PGP_PASSPHRASE }}
+        run: |
+          sbt -Dsbt.color=always -batch \
+            "set ThisBuild / version := \"${GITHUB_REF#refs/tags/v}\"" \
+            +publishSigned sonatypeBundleRelease
