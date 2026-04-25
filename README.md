@@ -708,6 +708,29 @@ let snap = table.snapshot_at_version(0)?;  // time travel
 
 ## Getting Started
 
+### Install the CLI
+
+Prebuilt binaries via Homebrew (macOS + Linuxbrew):
+
+```bash
+brew install connoradams-mariner/tap/fluxcapacitor
+```
+
+Or the curl|sh installer (macOS + Linux):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/connoradams-mariner/Flux-Compressor/releases/latest/download/fluxcapacitor-installer.sh \
+  | sh
+```
+
+Both ship architecture-specific binaries (Apple Silicon, Intel mac,
+x86_64 / aarch64 Linux) signed against the SHA-256 of the GitHub
+Release artifacts. See [docs/homebrew.md](docs/homebrew.md) for
+details.
+
+### Build from source
+
 ```bash
 # Build & test
 cargo build --release
@@ -938,6 +961,7 @@ walkthrough including cluster scoping, init scripts, and troubleshooting.
 
 See also:
 - [docs/release-process.md](docs/release-process.md) — how Conventional Commits + release-please drive versions
+- [docs/homebrew.md](docs/homebrew.md) — Homebrew tap + cargo-dist binary distribution
 - [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md)
 - [docs/roadmap-mutations.md](docs/roadmap-mutations.md) — DELETE / UPDATE / MERGE via COW
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
