@@ -118,7 +118,11 @@ jobs:
   build-local-artifacts:
     name: Build ${{ matrix.target }}
     needs: plan
-    if: ${{ fromJson(needs.plan.outputs.manifest).ci.github.artifacts_matrix.local != null || true }}
+    # Only build real binaries on tag pushes.  On PRs the `plan` job
+    # has already validated the cargo-dist config end-to-end, and
+    # running the full mac+linux build matrix on every commit burns
+    # ~20 minutes of CI for zero added signal.
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -192,6 +196,10 @@ jobs:
   build-global-artifacts:
     name: Build global artifacts
     needs: [plan, build-local-artifacts]
+    # Same gating as `build-local-artifacts` — belt-and-suspenders so the
+    # job is explicitly skipped on PRs even if a future GitHub Actions
+    # change alters the default skipped-needs cascade.
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
