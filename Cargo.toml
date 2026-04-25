@@ -118,3 +118,11 @@ pr-run-mode = "plan"
 install-updater = false
 # Skip prerelease tags (release-please never cuts these, but be defensive).
 publish-prereleases = false
+# Allow `release-binaries.yml` to diverge from cargo-dist's canonical
+# template.  Our workflow is hand-customised to (1) match the existing
+# `v*.*.*` tag trigger shared with release-crates / release-pypi /
+# release-maven and (2) push the formula to a tap repo via a
+# fine-grained PAT instead of cargo-dist's default GitHub App flow.
+# Without this, `cargo dist plan` errors out on every PR with a diff
+# of what it would have generated.
+allow-dirty = ["ci"]
