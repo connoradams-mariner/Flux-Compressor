@@ -14,11 +14,6 @@ repository.workspace = true
 name       = "fluxcompress"
 crate-type = ["cdylib", "rlib"]
 
-# cargo-dist: the Python extension ships as wheels via maturin
-# (`release-pypi.yml`), not as a standalone CLI binary.
-[package.metadata.dist]
-dist = false
-
 [dependencies]
 # Alias `flux-loom` back to `loom` for the PyO3 extension. Version
 # pin is at the workspace level.
