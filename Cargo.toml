@@ -80,9 +80,11 @@ criterion   = { version = "0.5", features = ["html_reports"] }
 # Triggered on the same `vX.Y.Z` tags release-please cuts.  cargo-dist
 # only packages members that produce a `[[bin]]` target, so out of this
 # workspace only `fluxcapacitor` ships — `flux-loom`, `flux-jni-bridge`
-# and `fluxcompress-python` are libraries / cdylibs and are explicitly
-# opted out via `[package.metadata.dist] dist = false` in their own
-# manifests.
+# and `fluxcompress-python` are libraries / cdylibs and are auto-skipped.
+# We deliberately do NOT add `[package.metadata.dist]` blocks to the
+# per-crate manifests because release-please's cargo-workspace plugin
+# mis-parses them when they appear after `[lib]` in crates that use
+# `version.workspace = true`, and breaks the release-PR open step.
 #
 # To regenerate `release-binaries.yml` after editing this block, run:
 #     cargo dist init --yes

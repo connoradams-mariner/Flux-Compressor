@@ -12,11 +12,6 @@ repository.workspace = true
 name = "fluxcapacitor"
 path = "src/main.rs"
 
-# cargo-dist: this is the only workspace member that ships as a
-# prebuilt CLI binary (Homebrew formula + curl|sh installer).
-[package.metadata.dist]
-dist = true
-
 [dependencies]
 # Alias `flux-loom` back to the short `loom` name so the CLI's
 # `use loom::…` imports stay identical. Version pin is at the
