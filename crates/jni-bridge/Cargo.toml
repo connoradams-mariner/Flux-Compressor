@@ -13,6 +13,11 @@ name       = "flux_jni"
 # cdylib → native shared library (.so / .dylib / .dll) loaded by the JVM.
 crate-type = ["cdylib", "rlib"]
 
+# cargo-dist: the JNI bridge ships inside the Maven JAR, not as a
+# standalone CLI binary.  Opt out of cargo-dist explicitly.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 # Pull `flux-loom` from the workspace; alias it as `loom` locally so
 # `use loom::…` inside this crate stays unchanged. Version pin lives

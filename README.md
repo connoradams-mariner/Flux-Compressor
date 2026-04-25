@@ -708,6 +708,29 @@ let snap = table.snapshot_at_version(0)?;  // time travel
 
 ## Getting Started
 
+### Install the CLI
+
+Prebuilt binaries via Homebrew (macOS + Linuxbrew):
+
+```bash
+brew install connoradams-mariner/tap/fluxcapacitor
+```
+
+Or the curl|sh installer (macOS + Linux):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/connoradams-mariner/Flux-Compressor/releases/latest/download/fluxcapacitor-installer.sh \
+  | sh
+```
+
+Both ship architecture-specific binaries (Apple Silicon, Intel mac,
+x86_64 / aarch64 Linux) signed against the SHA-256 of the GitHub
+Release artifacts. See [docs/homebrew.md](docs/homebrew.md) for
+details.
+
+### Build from source
+
 ```bash
 # Build & test
 cargo build --release
@@ -878,9 +901,17 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 
 ## Using FluxCompress from Databricks / PySpark
 
+> **Supported compute tiers:** Databricks **Classic** compute
+> (Single User / Shared / No Isolation Shared). **Serverless compute
+> is not supported today** — it blocks Maven library installs and
+> `System.load()` for JNI libraries. Serverless users can still run
+> the Python-only path (`pip install fluxcompress` → `fc.compress_polars`)
+> but not the Spark DSv2 `format("flux")` integration. Details +
+> roadmap: [docs/databricks.md](docs/databricks.md#serverless-limitations).
+
 ```python
 # Install the Maven library on your cluster:
-#   com.datamariners.fluxcompress:flux-spark-connector_2.12:0.5.0
+#   com.datamariners.fluxcompress:flux-spark-connector_2.12:0.5.4
 # (the JAR ships the right flux_jni cdylib for every major OS + arch,
 #  so no DBFS sidecar is required).
 
@@ -929,7 +960,9 @@ walkthrough including cluster scoping, init scripts, and troubleshooting.
   reuse training work.
 
 See also:
-- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md) — Phase H Spark DataSource V2 connector
+- [docs/release-process.md](docs/release-process.md) — how Conventional Commits + release-please drive versions
+- [docs/homebrew.md](docs/homebrew.md) — Homebrew tap + cargo-dist binary distribution
+- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md)
 - [docs/roadmap-mutations.md](docs/roadmap-mutations.md) — DELETE / UPDATE / MERGE via COW
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
 - [docs/roadmap-wal.md](docs/roadmap-wal.md) — Binary WAL migration

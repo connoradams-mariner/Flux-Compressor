@@ -17,6 +17,12 @@ repository.workspace  = true
 name = "loom"
 crate-type = ["rlib"]
 
+# cargo-dist: this is a library crate, never ship it as a standalone
+# binary release artifact.  Belt-and-suspenders — cargo-dist already
+# auto-skips crates without a `[[bin]]` target.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 arrow.workspace       = true
 arrow-array.workspace = true

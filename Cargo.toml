@@ -73,3 +73,56 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Testing
 criterion   = { version = "0.5", features = ["html_reports"] }
+
+# ---------------------------------------------------------------------------
+# cargo-dist: prebuilt binary releases + Homebrew tap.
+#
+# Triggered on the same `vX.Y.Z` tags release-please cuts.  cargo-dist
+# only packages members that produce a `[[bin]]` target, so out of this
+# workspace only `fluxcapacitor` ships — `flux-loom`, `flux-jni-bridge`
+# and `fluxcompress-python` are libraries / cdylibs and are explicitly
+# opted out via `[package.metadata.dist] dist = false` in their own
+# manifests.
+#
+# To regenerate `release-binaries.yml` after editing this block, run:
+#     cargo dist init --yes
+#
+# See `docs/homebrew.md` for the one-time tap-repo + secret setup.
+# ---------------------------------------------------------------------------
+[workspace.metadata.dist]
+# Pin cargo-dist so CI reproducibility doesn't drift.  Bump in lockstep
+# with `cargo dist init` when upgrading.
+cargo-dist-version = "0.27.0"
+# CI backends to support.
+ci = "github"
+# Installers to generate.  `shell` produces the curl|sh installer that
+# Linux / macOS users can pipe; `homebrew` ships the formula to the tap.
+installers = ["shell", "homebrew"]
+# The GitHub repo to push Homebrew formulas to.  This MUST exist before
+# the first tagged release — see docs/homebrew.md.
+tap = "connoradams-mariner/homebrew-tap"
+# Publish jobs to run in CI on tagged releases.
+publish-jobs = ["homebrew"]
+# Target platforms to build for.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# Run plan-only on PRs so contributors get fast feedback without the
+# full build matrix executing on every commit.
+pr-run-mode = "plan"
+# Don't bundle the `axoupdater` self-update binary — fluxcapacitor is
+# small and the existing release-please pipeline handles version bumps.
+install-updater = false
+# Skip prerelease tags (release-please never cuts these, but be defensive).
+publish-prereleases = false
+# Allow `release-binaries.yml` to diverge from cargo-dist's canonical
+# template.  Our workflow is hand-customised to (1) match the existing
+# `v*.*.*` tag trigger shared with release-crates / release-pypi /
+# release-maven and (2) push the formula to a tap repo via a
+# fine-grained PAT instead of cargo-dist's default GitHub App flow.
+# Without this, `cargo dist plan` errors out on every PR with a diff
+# of what it would have generated.
+allow-dirty = ["ci"]
