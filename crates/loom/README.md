@@ -5,7 +5,7 @@
 
 **The core compression engine for [FluxCompress](https://github.com/connoradams-mariner/Flux-Compressor)** — a dtype-aware, probe-gated, adaptive columnar storage format that beats Parquet on compression ratio across every Arrow type and now matches or exceeds Parquet on decompression throughput for nested / mixed / float-heavy workloads.
 
-> **Published as `flux-loom` because `loom` is already taken on crates.io.** Inside a workspace you can keep the short `loom` alias: `loom = { package = "flux-loom", version = "0.5.4" }`. <!-- x-release-please-version -->
+> **Published as `flux-loom` because `loom` is already taken on crates.io.** Inside a workspace you can keep the short `loom` alias: `loom = { package = "flux-loom", version = "0.6.0" }`. <!-- x-release-please-version -->
 
 ## What it does
 
@@ -21,7 +21,7 @@
 [dependencies]
 # Rename to `loom` locally so `use loom::*` stays idiomatic; `flux-loom`
 # is the published name.
-loom = { package = "flux-loom", version = "0.5.4" } # x-release-please-version
+loom = { package = "flux-loom", version = "0.6.0" } # x-release-please-version
 arrow-array = "52"
 arrow-schema = "52"
 ```
@@ -59,7 +59,7 @@ assert_eq!(back.num_rows(), 1_000_000);
 | `Archive`   | Zstd secondary pass. Best ratio; ~30–50 % slower encode.        |
 | `Brotli`    | Brotli on strings + Zstd on numerics. Biggest wins on text.     |
 
-## Benchmarks (v0.5.4) <!-- x-release-please-version -->
+## Benchmarks (v0.6.0) <!-- x-release-please-version -->
 
 On a realistic 13-column float-heavy schema, 10 M rows, `flux-loom` at Archive:
 - **30.1 % smaller** than Parquet zstd-3 and Delta Lake.

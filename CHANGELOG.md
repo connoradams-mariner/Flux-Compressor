@@ -6,6 +6,32 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0](https://github.com/connoradams-mariner/Flux-Compressor/compare/flux-compressor-v0.5.4...flux-compressor-v0.6.0) (2026-04-26)
+
+
+### Features
+
+* complete FluxCompress codebase (all 5 sprints) ([d224d0e](https://github.com/connoradams-mariner/Flux-Compressor/commit/d224d0e42406bd8ba69abb1d17415f4de8aae055))
+* concurrent writers ([f38d453](https://github.com/connoradams-mariner/Flux-Compressor/commit/f38d453a65cc2e4717f78452a147ea241d4e0779))
+* improve high cardinality string compression ([a0a719c](https://github.com/connoradams-mariner/Flux-Compressor/commit/a0a719cf1db33f2f75dfcf5aaf94011a7c58d2fb))
+
+
+### Bug Fixes
+
+* chunk compression and mmap decompress in python. feat: implement hidden partitioning and liquid clustering. ([3eb5680](https://github.com/connoradams-mariner/Flux-Compressor/commit/3eb5680eb4096e66593051eeb7b386f4834c5bc0))
+* **ci:** fix cargo-workspace limitation ([776cc9e](https://github.com/connoradams-mariner/Flux-Compressor/commit/776cc9e1319288268677c701ae8ce9cafd6c08ae))
+* **ci:** remove per-crate cargo-dist metadata blocks ([434b878](https://github.com/connoradams-mariner/Flux-Compressor/commit/434b8785d2da6dd3ff2ecaf68ebc3114848eb78a))
+* **ci:** remove per-crate cargo-dist metadata blocks ([a91671a](https://github.com/connoradams-mariner/Flux-Compressor/commit/a91671a3aafcf2f0d3b272a9af77bd7c7c410082))
+* fluxtable streaming ([3127195](https://github.com/connoradams-mariner/Flux-Compressor/commit/31271953d91a0e61fcecd66454f13ab0dc7ba672))
+* high cardinality string compression. combining cols of like types for compression ([ec7a5e8](https://github.com/connoradams-mariner/Flux-Compressor/commit/ec7a5e877252fd3d2e5d23df3ee4608e167c0737))
+* polars LargeUint8 type issue ([903a435](https://github.com/connoradams-mariner/Flux-Compressor/commit/903a435f59c41a3eddfdcb946cdaf3af1183e4f8))
+* release-type=simple ([57886a7](https://github.com/connoradams-mariner/Flux-Compressor/commit/57886a7a402f0603d959b5bda90db59b6c11ff17))
+
+
+### Documentation
+
+* **databricks:** document serverless compute support; add compute-tier matrix ([7ebb0d7](https://github.com/connoradams-mariner/Flux-Compressor/commit/7ebb0d7a14c28519728f57c8b7747642ec7787fa))
+
 ## [Unreleased]
 
 (No unreleased changes — see `v0.3.0` below.)
