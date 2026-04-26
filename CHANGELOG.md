@@ -6,6 +6,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.1](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.0...v0.6.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** add cargo-dist [profile.dist] to workspace ([911de62](https://github.com/connoradams-mariner/Flux-Compressor/commit/911de621b9247dec141c199a4987666c94b261fe))
+* **ci:** drop component prefix from release-please tags ([9ac6797](https://github.com/connoradams-mariner/Flux-Compressor/commit/9ac6797e60e757c59ee538f2b3c3a1a960759502))
+
 ## [0.6.0](https://github.com/connoradams-mariner/Flux-Compressor/compare/flux-compressor-v0.5.4...flux-compressor-v0.6.0) (2026-04-26)
 
 
