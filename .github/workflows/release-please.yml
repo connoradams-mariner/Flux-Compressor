@@ -1,5 +1,17 @@
 # release-please: automated semantic versioning + release cuts.
 #
+# ## Why we don't use the `cargo-workspace` plugin
+#
+# release-please bug googleapis/release-please#2111: the
+# `cargo-workspace` plugin can't parse member crates that use
+# `version.workspace = true` (workspace inheritance), erroring with
+# "package manifest at crates/X/Cargo.toml has an invalid
+# [package.version]".  We don't need it: the `extra-files` updaters in
+# `release-please-config.json` bump `[workspace.package].version` in
+# the root Cargo.toml, and every member crate inherits via
+# `version.workspace = true` at `cargo build` time.  Re-enable only if
+# release-please ships a fix.
+#
 # ## How it works
 #
 # 1.  You push / merge a PR into `main` with a Conventional Commit

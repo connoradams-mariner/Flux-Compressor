@@ -71,10 +71,5 @@
     }
   },
 
-  "plugins": [
-    {
-      "type": "cargo-workspace",
-      "updateAllPackages": true
-    }
-  ]
+  "plugins": []
 }
