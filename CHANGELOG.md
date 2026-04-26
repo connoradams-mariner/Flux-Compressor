@@ -6,6 +6,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.3](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.2...v0.6.3) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** cargo-zigbuild + precise-builds for cargo-dist ([6589771](https://github.com/connoradams-mariner/Flux-Compressor/commit/6589771e1b485c5b86fab1892eb6b599ce53b44d))
+* **ci:** cargo-zigbuild + precise-builds for cargo-dist ([af7652e](https://github.com/connoradams-mariner/Flux-Compressor/commit/af7652ed38c8f1dc2f0d1212e21fe87456173f26))
+
 ## [0.6.2](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.1...v0.6.2) (2026-04-26)
 
 
