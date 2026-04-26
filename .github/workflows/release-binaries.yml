@@ -127,10 +127,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both macOS targets run on the Apple Silicon fleet (`macos-14`).
+          # The arm64 runner builds `aarch64-apple-darwin` natively and
+          # cross-compiles `x86_64-apple-darwin` via the pre-installed
+          # universal Xcode toolchain — zero extra setup required.
+          # The Intel-x86_64 public runner fleet (`macos-13`) is being
+          # sunset and can block queued jobs for 10–30 minutes at a
+          # time; the Apple Silicon fleet is ~3-4× bigger at the same
+          # minute multiplier.  This mirrors the matrix already used in
+          # `release-pypi.yml`.
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
