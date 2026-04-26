@@ -160,12 +160,18 @@ jobs:
         with:
           shared-key: dist-${{ matrix.target }}
 
-      # aarch64-linux is cross-compiled from x86_64 ubuntu via cross.
-      - name: Install cross-compilation toolchain (aarch64-linux)
+      # cargo-dist uses cargo-zigbuild (Zig as a portable cross-linker)
+      # for aarch64-linux cross-compilation from x86_64 ubuntu.  Without
+      # it, `dist build --target=aarch64-unknown-linux-gnu` errors with
+      # "The following tools are required to run this task, but are
+      # missing: cargo-zigbuild".  This mirrors the `packages_install`
+      # step that `cargo dist plan` would auto-emit.
+      - name: Install cargo-zigbuild (aarch64-linux cross-compile)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          if ! command -v cargo-zigbuild > /dev/null 2>&1; then
+            pip3 install cargo-zigbuild
+          fi
 
       - name: Install cargo-dist
         run: |
@@ -174,9 +180,6 @@ jobs:
             | sh
 
       - name: Build artifacts
-        env:
-          # Linker for cross-compiled aarch64 linux builds.
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cargo dist build ${{ needs.plan.outputs.tag-flag }} \
             --print=linkage \
