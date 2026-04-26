@@ -1,16 +1,25 @@
 # release-please: automated semantic versioning + release cuts.
 #
-# ## Why we don't use the `cargo-workspace` plugin
+# ## Why `release-type` is `simple` (not `rust`)
 #
-# release-please bug googleapis/release-please#2111: the
-# `cargo-workspace` plugin can't parse member crates that use
-# `version.workspace = true` (workspace inheritance), erroring with
-# "package manifest at crates/X/Cargo.toml has an invalid
-# [package.version]".  We don't need it: the `extra-files` updaters in
-# `release-please-config.json` bump `[workspace.package].version` in
-# the root Cargo.toml, and every member crate inherits via
-# `version.workspace = true` at `cargo build` time.  Re-enable only if
-# release-please ships a fix.
+# Both the `rust` release-type and the `cargo-workspace` plugin walk
+# workspace member crates and try to read `[package].version` as a
+# literal string.  They fail on `version.workspace = true`
+# (Cargo workspace inheritance) with one of:
+#
+#   * "package manifest at crates/X/Cargo.toml has an invalid
+#     [package.version]"  (cargo-workspace plugin)
+#   * "value at path package.version is not tagged"  (rust strategy)
+#
+# Tracking issues: googleapis/release-please#2111, #2478.
+#
+# Workaround used by other Rust workspace projects: switch to
+# `release-type: simple`, which is a pure version-bumper that doesn't
+# introspect Cargo.toml at all.  We then use the `extra-files` jsonpath
+# updaters in `release-please-config.json` to bump
+# `[workspace.package].version` in the root Cargo.toml, and every
+# member crate inherits via `version.workspace = true` at `cargo build`
+# time.  Re-evaluate if release-please ships a fix.
 #
 # ## How it works
 #
