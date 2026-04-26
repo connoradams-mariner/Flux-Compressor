@@ -6,6 +6,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.2](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.1...v0.6.2) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** use PAT for release-please so tags trigger downstream workflows ([7b9ea0d](https://github.com/connoradams-mariner/Flux-Compressor/commit/7b9ea0d24b219e7a88edea22a2ba0541c761e172))
+
 ## [0.6.1](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.0...v0.6.1) (2026-04-26)
 
 
