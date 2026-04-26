@@ -128,6 +128,15 @@ publish-prereleases = false
 # Without this, `cargo dist plan` errors out on every PR with a diff
 # of what it would have generated.
 allow-dirty = ["ci"]
+# Build only the packages that produce shipped artifacts (i.e.
+# `fluxcapacitor`) instead of the whole workspace.  Without this,
+# cargo-dist runs `cargo build --workspace --profile dist` and pulls
+# in `fluxcompress-python` (the PyO3 cdylib), which fails to link on
+# cross-target macOS builds because the Python framework isn't
+# available for the cross architecture.  fluxcompress-python ships as
+# wheels via `release-pypi.yml`; it does not belong in the binary
+# release pipeline.
+precise-builds = true
 
 # cargo-dist's release profile.  cargo-dist invokes
 # `cargo build --profile dist`, which Cargo only knows about if we
