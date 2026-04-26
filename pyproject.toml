@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name        = "fluxcompress"
-version     = "0.6.1"
+version     = "0.6.2"
 description = "High-performance adaptive columnar compression for Python (Polars, Spark, PyArrow)"
 readme      = "README.md"
 license     = { text = "Apache-2.0" }

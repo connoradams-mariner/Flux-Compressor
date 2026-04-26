@@ -49,7 +49,7 @@ The Spark connector's `FluxNativeLoader` auto-extracts the right `libflux_jni` f
 
 ```toml
 [dependencies]
-flux-jni-bridge = "0.6.1" # x-release-please-version
+flux-jni-bridge = "0.6.2" # x-release-please-version
 ```
 
 Internally depends on [`flux-loom`](https://crates.io/crates/flux-loom) for the compression engine.
