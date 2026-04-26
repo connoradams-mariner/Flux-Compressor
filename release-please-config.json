@@ -9,6 +9,7 @@
       "package-name": "flux-compressor",
       "component": "flux-compressor",
       "include-v-in-tag": true,
+      "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
       "changelog-sections": [
         { "type": "feat",     "section": "Features" },

@@ -128,3 +128,13 @@ publish-prereleases = false
 # Without this, `cargo dist plan` errors out on every PR with a diff
 # of what it would have generated.
 allow-dirty = ["ci"]
+
+# cargo-dist's release profile.  cargo-dist invokes
+# `cargo build --profile dist`, which Cargo only knows about if we
+# define it here.  Inheriting from `release` keeps existing release
+# semantics; `lto = "thin"` matches what `cargo dist init` would have
+# emitted by default and gives a 5–10 % size win on the published
+# binary at modest extra link time.
+[profile.dist]
+inherits = "release"
+lto = "thin"
