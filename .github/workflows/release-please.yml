@@ -50,12 +50,20 @@
 # * release-please creates its own branch (`release-please--branches--main`)
 #   and opens a PR into main. Branch-protection rules that require
 #   status checks to pass will still apply to that PR.
-# * The `GITHUB_TOKEN` this action uses is the default job token.  It
-#   can write to the repo (PR creation, commits on the release branch,
-#   tagging).  No custom PAT required unless your protection rules
-#   disallow the default token from pushing - in which case you can
-#   set `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}` and create a fine-
-#   grained PAT with the relevant permissions.
+# * We use a fine-grained PAT (`RELEASE_PLEASE_TOKEN`) instead of the
+#   default `GITHUB_TOKEN`.  Reason: GitHub Actions explicitly
+#   blocks workflow runs triggered by events from the default
+#   `GITHUB_TOKEN` to prevent recursive workflow invocation.  Without
+#   the PAT, every `vX.Y.Z` tag release-please pushes is silently
+#   ignored by `release-crates.yml`, `release-pypi.yml`,
+#   `release-maven.yml`, and `release-binaries.yml` — they only fire
+#   if a human pushes the tag.  Using a PAT makes the tag look like a
+#   user push and the downstream pipelines run automatically.
+#
+#   The PAT is fine-grained, scoped to this repo only, with
+#   `Contents: write` and `Pull requests: write`.  Rotate per the
+#   token's expiration (default 90 days).  See `docs/homebrew.md` for
+#   the equivalent walkthrough of `HOMEBREW_TAP_TOKEN`.
 
 name: release-please
 
@@ -80,6 +88,13 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
+          # Fine-grained PAT scoped to this repo (Contents: write,
+          # Pull requests: write).  Required so the `vX.Y.Z` tags this
+          # action pushes actually trigger the four downstream
+          # `release-*.yml` workflows; the default `GITHUB_TOKEN` is
+          # blocked from causing workflow re-entry.  See the header
+          # comment for full context.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           # Monorepo-manifest mode - see `release-please-config.json`
           # and `.release-please-manifest.json` in the repo root.
           config-file: release-please-config.json
