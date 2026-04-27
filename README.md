@@ -433,8 +433,34 @@ pip install maturin && maturin develop --release
 pytest python/tests/ -v
 
 # CLI
-fluxcapacitor compress -i data.arrow -o output.flux
-fluxcapacitor bench --rows 50000000 --pattern sequential
+fluxcapacitor compress   -i data.arrow   -o output.flux
+fluxcapacitor compress   -i data.csv     -o output.flux   # CSV / TSV
+fluxcapacitor compress   -i data.parquet -o output.flux   # Parquet
+fluxcapacitor compress   -i data.xlsx    -o output.flux   # Excel
+fluxcapacitor decompress -i output.flux  -o data.csv      # any writable format
+fluxcapacitor bench      --rows 50000000 --pattern sequential
+```
+## File formats
+The `compress` and `decompress` subcommands auto-detect the on-disk
+format from the file extension. Supported formats:
+```
+Extension                          Read    Write   Backend
+─────────────────────────────────  ──────  ──────  ─────────────────────────
+.csv                               yes     yes     arrow::csv
+.tsv, .tab                         yes     yes     arrow::csv (tab)
+.json                              yes     yes     arrow::json (array form)
+.ndjson, .jsonl                    yes     yes     arrow::json (line-delim.)
+.parquet, .pq                      yes     yes     parquet::arrow (snappy)
+.arrow, .ipc, .feather             yes     yes     arrow::ipc
+.orc                               yes     yes     orc-rust
+.xlsx                              yes     yes     calamine + rust_xlsxwriter
+.xls, .xlsm, .ods                  yes     no      calamine
+```
+Schema inference is performed on the first 100 rows for CSV / JSON /
+Excel. Run the included benchmark suite to measure load + compress
+throughput across formats:
+```bash
+cargo bench -p fluxcapacitor --bench file_formats
 ```
 
 ### Python

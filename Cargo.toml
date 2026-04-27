@@ -16,10 +16,14 @@ repository  = "https://github.com/connoradams-mariner/Flux-Compressor"
 
 [workspace.dependencies]
 # Arrow / columnar interop
-arrow       = { version = "52", features = ["prettyprint"] }
+arrow       = { version = "52", features = ["prettyprint", "csv", "json", "ipc"] }
 arrow-array = "52"
 arrow-schema = "52"
 arrow-buffer = "52"
+
+# Excel (read xlsx/xls/xlsm/ods, write xlsx)
+calamine        = { version = "0.24" }
+rust_xlsxwriter = { version = "0.79" }
 
 # Serialisation
 byteorder   = "1"

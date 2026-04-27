@@ -10,8 +10,8 @@
 //!     fluxcapacitor <COMMAND>
 //!
 //! COMMANDS:
-//!     compress    Compress a Parquet / CSV file into .flux format
-//!     decompress  Decompress a .flux file back to Arrow IPC
+//!     compress    Compress a tabular file (CSV/TSV/JSON/Parquet/Arrow/ORC/XLSX/...) into .flux
+//!     decompress  Decompress a .flux file back to any supported tabular format
 //!     optimize    Two-pass cold storage optimizer (global dict + Z-Order)
 //!     merge       Merge multiple .flux files into one
 //!     inspect     Print Atlas footer metadata for a .flux file
@@ -23,6 +23,8 @@ mod inspector;
 mod bench;
 mod dtype_bench;
 mod string_bench;
+
+use fluxcapacitor::formats;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -49,7 +51,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compress a Parquet or CSV file into .flux format.
+    /// Compress a tabular file into .flux format.
+    ///
+    /// Input format is auto-detected from the file extension. Supported:
+    /// `.csv`, `.tsv`, `.json`, `.ndjson`/`.jsonl`, `.parquet`, `.arrow`/
+    /// `.ipc`/`.feather`, `.orc`, `.xlsx`, `.xls`, `.xlsm`, `.ods`.
     Compress {
         #[arg(short, long)]
         input: std::path::PathBuf,
@@ -60,7 +66,11 @@ enum Commands {
         strategy: String,
     },
 
-    /// Decompress a .flux file to Arrow IPC.
+    /// Decompress a .flux file to any supported tabular format.
+    ///
+    /// Output format is chosen by the `output` extension: `.csv`, `.tsv`,
+    /// `.json`, `.ndjson`/`.jsonl`, `.parquet`, `.arrow`/`.ipc`/`.feather`,
+    /// `.orc`, or `.xlsx`. (Excel `.xls`/`.xlsm`/`.ods` are read-only.)
     Decompress {
         #[arg(short, long)]
         input: std::path::PathBuf,
@@ -174,9 +184,16 @@ fn cmd_compress(
     };
     use std::fs;
 
-    tracing::info!("Compressing {:?} → {:?}", input, output);
+    let format = formats::FileFormat::from_path(input)?;
+    tracing::info!(
+        "Compressing {:?} ({}) → {:?}",
+        input, format.label(), output,
+    );
 
-    let batches = load_arrow_batches(input)?;
+    let batches = formats::load_batches(input)?;
+    if batches.is_empty() {
+        anyhow::bail!("input {:?} produced zero RecordBatches", input);
+    }
 
     let forced: Option<LoomStrategy> = match strategy {
         "auto"    => None,
@@ -197,11 +214,14 @@ fn cmd_compress(
     let in_size = fs::metadata(input)?.len() as usize;
     fs::write(output, &flux_bytes)?;
 
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!(
-        "Compressed {}  →  {}  ({:.2}x ratio)",
+        "Compressed {} ({} rows, {}) → {} ({:.2}× vs source bytes)",
+        format.label(),
+        total_rows,
         human_size(in_size),
         human_size(flux_bytes.len()),
-        in_size as f64 / flux_bytes.len() as f64,
+        in_size as f64 / flux_bytes.len().max(1) as f64,
     );
     Ok(())
 }
@@ -212,19 +232,20 @@ fn cmd_compress(
 
 fn cmd_decompress(input: &std::path::Path, output: &std::path::Path) -> Result<()> {
     use loom::{decompressors::flux_reader::FluxReader, traits::LoomDecompressor};
-    use arrow::ipc::writer::FileWriter;
-    use std::fs::{self, File};
+    use std::fs;
 
-    let flux_bytes = fs::read(input)?;
+    let flux_bytes = fs::read(input)
+        .map_err(|e| anyhow::anyhow!("reading {:?}: {e}", input))?;
     let reader = FluxReader::new("value");
     let batch = reader.decompress_all(&flux_bytes)?;
 
-    let file = File::create(output)?;
-    let mut writer = FileWriter::try_new(file, batch.schema().as_ref())?;
-    writer.write(&batch)?;
-    writer.finish()?;
+    let format = formats::FileFormat::from_path(output)?;
+    formats::save_batches(output, std::slice::from_ref(&batch))?;
 
-    println!("Decompressed {} rows → {:?}", batch.num_rows(), output);
+    println!(
+        "Decompressed {} rows → {:?} ({})",
+        batch.num_rows(), output, format.label()
+    );
     Ok(())
 }
 
@@ -269,18 +290,6 @@ fn cmd_merge(inputs: &[std::path::PathBuf], output: &std::path::Path) -> Result<
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-fn load_arrow_batches(path: &std::path::Path) -> Result<Vec<arrow_array::RecordBatch>> {
-    use arrow::ipc::reader::FileReader;
-    use std::fs::File;
-    let file = File::open(path)?;
-    let reader = FileReader::try_new(file, None)?;
-    let mut batches = Vec::new();
-    for b in reader {
-        batches.push(b?);
-    }
-    Ok(batches)
-}
 
 pub fn human_size(bytes: usize) -> String {
     if bytes < 1024 {
