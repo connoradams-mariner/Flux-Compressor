@@ -198,6 +198,12 @@ jobs:
             target/distrib/*.zip
             target/distrib/*.json
             target/distrib/*-dist-manifest.json
+            # cargo-dist 0.27 writes a sibling `.sha256` for each
+            # archive; without uploading these, the Host job's
+            # `cargo dist host --steps=upload` silently no-ops with
+            # `upload_files: []` and publishes an empty release
+            # (root cause of the v0.6.1/v0.6.2/v0.6.4 incidents).
+            target/distrib/*.sha256
 
   # ---------------------------------------------------------------------
   # 3. BUILD GLOBAL ARTIFACTS
@@ -247,6 +253,12 @@ jobs:
             target/distrib/*.ps1
             target/distrib/*.rb
             target/distrib/*.json
+            # See note in `build-local-artifacts`. Without `*.sha256`
+            # and the unified `sha256.sum`, `cargo dist host
+            # --steps=upload` decides the artifact set is incomplete
+            # and uploads nothing.
+            target/distrib/*.sha256
+            target/distrib/sha256.sum
 
   # ---------------------------------------------------------------------
   # 4. HOST
@@ -286,6 +298,30 @@ jobs:
             --output-format=json \
             > dist-manifest.json
           cat dist-manifest.json
+
+      # Belt-and-suspenders: cargo-dist 0.27's Host step has been
+      # observed to silently set `upload_files: []` when its internal
+      # plan disagrees with the on-disk artifact set, producing a
+      # published-but-empty release (see the v0.6.4 incident in
+      # docs/homebrew.md). Re-attach every artifact in
+      # `target/distrib/` directly via the gh CLI so the release
+      # always ends up with a complete asset set even if cargo-dist
+      # regresses again. `--clobber` makes this idempotent if
+      # cargo-dist already uploaded the file.
+      - name: Backstop upload via gh CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd target/distrib
+          shopt -s nullglob
+          files=( fluxcapacitor-*.tar.xz fluxcapacitor-*.tar.gz fluxcapacitor-*.zip \
+                  fluxcapacitor-*.sha256 fluxcapacitor-installer.sh fluxcapacitor.rb \
+                  sha256.sum )
+          if [ ${#files[@]} -gt 0 ]; then
+            gh release upload "${{ needs.plan.outputs.tag }}" --clobber "${files[@]}"
+          else
+            echo "::warning::No artifacts found in target/distrib for backstop upload."
+          fi
 
       - name: Upload combined manifest
         uses: actions/upload-artifact@v4
