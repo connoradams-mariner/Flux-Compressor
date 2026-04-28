@@ -6,6 +6,14 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.4](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.3...v0.6.4) (2026-04-28)
+
+
+### Bug Fixes
+
+* bundle CSV/Excel/Parquet I/O + float64 BitSlab corruption + Spark V2 connector ([ad6bd87](https://github.com/connoradams-mariner/Flux-Compressor/commit/ad6bd879a6667c4196b2802d37c3b112ee510c47))
+* bundle CSV/Excel/Parquet I/O + float64 BitSlab corruption + Spark V2 connector ([47be642](https://github.com/connoradams-mariner/Flux-Compressor/commit/47be6421deb6332bfc4f504dc3e38cb43e267c2c))
+
 ## [0.6.3](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.2...v0.6.3) (2026-04-26)
 
 
