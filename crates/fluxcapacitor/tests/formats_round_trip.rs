@@ -267,3 +267,56 @@ fn parquet_to_csv_conversion() {
     let from_csv = load_batches(&csv_path).unwrap();
     assert_eq!(total_rows(&from_csv), original.num_rows());
 }
+
+/// Regression: Spark/Pandas/Polars pipelines often produce batches where
+/// columns have *different* null counts. Earlier `extract_column_data`
+/// dropped null rows, leaving columns at different lengths and tripping
+/// `RecordBatch::try_new`'s "all columns must have the same length"
+/// validation on decompress.
+#[test]
+fn compress_then_decompress_multicol_with_mixed_nulls() {
+    use loom::compressors::flux_writer::FluxWriter;
+    use loom::decompressors::flux_reader::FluxReader;
+    use loom::traits::{LoomCompressor, LoomDecompressor};
+
+    let n = 64;
+
+    // Column A (Int64): every 5th row is null.
+    let id: ArrayRef = Arc::new(Int64Array::from(
+        (0..n as i64)
+            .map(|i| if i % 5 == 0 { None } else { Some(i) })
+            .collect::<Vec<_>>(),
+    ));
+    // Column B (Float64): different null pattern — every 7th row.
+    let revenue: ArrayRef = Arc::new(Float64Array::from(
+        (0..n)
+            .map(|i| if i % 7 == 0 { None } else { Some((i as f64) * 1.25) })
+            .collect::<Vec<_>>(),
+    ));
+    // Column C (Boolean): every 3rd row null — yet another distinct count.
+    let active: ArrayRef = Arc::new(BooleanArray::from(
+        (0..n)
+            .map(|i| if i % 3 == 0 { None } else { Some(i % 2 == 0) })
+            .collect::<Vec<_>>(),
+    ));
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id",      DataType::Int64,   true),
+        Field::new("revenue", DataType::Float64, true),
+        Field::new("active",  DataType::Boolean, true),
+    ]));
+    let original = RecordBatch::try_new(schema, vec![id, revenue, active]).unwrap();
+
+    let bytes = FluxWriter::new().compress(&original).unwrap();
+    let out = FluxReader::new("value").decompress_all(&bytes).unwrap();
+
+    // The actual fix: every column has the same length as the input.
+    assert_eq!(out.num_rows(), n);
+    for col in 0..out.num_columns() {
+        assert_eq!(
+            out.column(col).len(),
+            n,
+            "column {col} length mismatch (this was the original bug)",
+        );
+    }
+}

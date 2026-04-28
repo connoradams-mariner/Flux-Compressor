@@ -15,6 +15,51 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `python/tests/conftest.py` with shared session-scoped fixtures for all
   test modules.
 - `python/tests/test_pandas.py` — full pandas integration test suite.
+- **Multi-format CLI I/O** — `fluxcapacitor compress` / `decompress` now
+  auto-detect the input/output format from the file extension and
+  support CSV, TSV, JSON, NDJSON/JSONL, Parquet, Arrow IPC/Feather, ORC,
+  and Excel (`.xlsx` read+write; `.xls`/`.xlsm`/`.ods` read-only).
+  Implementation in `crates/fluxcapacitor/src/formats.rs`, with
+  integration tests in `crates/fluxcapacitor/tests/formats_round_trip.rs`
+  and a Criterion benchmark in
+  `crates/fluxcapacitor/benches/file_formats.rs`.
+- **Reference Spark V2 connector** — `java/io/fluxcompress/spark/`
+  registers the `flux` short name and supports every common save mode:
+  - `FluxTable` advertises `BATCH_WRITE` + `TRUNCATE` +
+    `OVERWRITE_BY_FILTER` capabilities.
+  - `FluxWriteBuilder` implements `SupportsTruncate` and
+    `SupportsOverwriteV2` so `mode("overwrite")` and predicate-based
+    `replaceWhere` work correctly.
+  - `FluxTableProvider` implements `SupportsCatalogOptions`.
+  - `FluxCatalog` (`TableCatalog` + `SupportsNamespaces`) lets admins
+    register the connector as a Unity Catalog catalog via
+    `spark.sql.catalog.flux=io.fluxcompress.spark.FluxCatalog`.
+- **Connector tests** — `FluxConnectorTest.java` (JUnit 5, no Spark
+  required) covers the capability matrix, truncate-flag propagation,
+  catalog table lifecycle, and `FluxBatchWrite` commit semantics.
+  `python/tests/spark_uc_smoke_test.py` is the cluster-side integration
+  test that exercises CREATE / AppendData / SupportsTruncate /
+  SupportsOverwriteV2 / DROP through the registered catalog.
+
+### Fixed
+- **Float64 / wide-slab BitSlab corruption.** `BitWriter` /
+  `BitReader::read_value` / `simd::scalar::unpack_scalar` truncated
+  values whenever `slab_width + bit_off > 64` because they used a `u64`
+  shift window. Float64 columns (typical slab width 62–63) hit this
+  every time and round-tripped to denormals. Fixed by keeping the u64
+  fast path for `width + bit_off ≤ 64` and splitting the rare wide-slab
+  case across an 8-byte boundary (writer) / using a `u128` 9-byte window
+  (reader). Regression tests in
+  `crates/loom/src/bit_io.rs::tests::round_trip_wide_widths_all_alignments`
+  and `round_trip_float64_bit_pattern`.
+- **Multi-column null-row alignment.** `extract_column_data` previously
+  used `filter_map` to drop null rows, so columns with different null
+  counts ended up with different lengths and tripped Spark's
+  `Invalid argument error: all columns in a record batch must have the
+  same length` on decompress. Now reads the underlying value buffer
+  directly so every column produces exactly `arr.len()` u64 slots, with
+  `0` placeholders for null cells. Regression test in
+  `crates/fluxcapacitor/tests/formats_round_trip.rs::compress_then_decompress_multicol_with_mixed_nulls`.
 
 ---
 

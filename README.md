@@ -476,6 +476,33 @@ result = fc.decompress(buf, predicate=fc.col("id") > 500_000)
 
 ---
 
+## Spark + Unity Catalog
+A reference Spark V2 connector lives under `java/io/fluxcompress/spark/`.
+It exposes the `flux` short name and — by implementing both
+`SupportsTruncate` (write builder) and `TableCapability.TRUNCATE` (table)
+— supports `mode("overwrite")`, `mode("append")`, default `save()`, and
+`replaceWhere`-style predicate overwrites.
+For Databricks Unity Catalog the connector also implements
+`SupportsCatalogOptions` plus a `TableCatalog` so it can be registered as
+a first-class UC catalog. Admin recipe (Single-User cluster):
+```
+spark.sql.catalog.flux        io.fluxcompress.spark.FluxCatalog
+spark.sql.catalog.flux.path   /Volumes/<catalog>/<schema>/<volume>
+```
+Then from any notebook:
+```python
+spark.sql("USE CATALOG flux")
+spark.sql("CREATE TABLE default.orders (id BIGINT, ts BIGINT) USING flux")
+df.writeTo("flux.default.orders").overwritePartitions()
+```
+Full capability matrix, build instructions, and UC fallbacks are in
+[`java/io/fluxcompress/spark/README.md`](java/io/fluxcompress/spark/README.md).
+Verify the deployment end-to-end with
+[`python/tests/spark_uc_smoke_test.py`](python/tests/spark_uc_smoke_test.py),
+which exercises CREATE / AppendData / SupportsTruncate /
+SupportsOverwriteV2 / DROP against a registered `flux` catalog.
+---
+
 ## Roadmap
 
 ### Completed (v0.2)
