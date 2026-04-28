@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version     = "0.6.4"
+version     = "0.6.5"
 edition     = "2024"
 license     = "Apache-2.0"
 authors     = ["Connor Adams"]
@@ -20,7 +20,7 @@ repository  = "https://github.com/connoradams-mariner/Flux-Compressor"
 # `loom.workspace = true` (with `package = "flux-loom"` so the crate
 # name on crates.io is `flux-loom` but the Rust identifier stays
 # `loom`).
-loom        = { version = "0.6.4", path = "crates/loom", package = "flux-loom" }
+loom        = { version = "0.6.5", path = "crates/loom", package = "flux-loom" }
 
 # Arrow / columnar interop
 arrow       = { version = "52", features = ["prettyprint", "csv", "json", "ipc"] }

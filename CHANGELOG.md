@@ -6,6 +6,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.5](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.4...v0.6.5) (2026-04-28)
+
+
+### Bug Fixes
+
+* **ci:** include sha256 checksums in release artifact uploads ([b68e403](https://github.com/connoradams-mariner/Flux-Compressor/commit/b68e40341aee0221376623640c7a466ffc78626d))
+
 ## [0.6.4](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.3...v0.6.4) (2026-04-28)
 
 
