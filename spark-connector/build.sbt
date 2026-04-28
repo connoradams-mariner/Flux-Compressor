@@ -38,7 +38,7 @@ ThisBuild / scmInfo := Some(
 // Version is overridden by the release-maven workflow via
 // `set ThisBuild / version      := "0.5.4"`; the default here only matters
 // for local development.
-ThisBuild / version      := "0.5.4" // x-release-please-version
+ThisBuild / version      := "0.6.3" // x-release-please-version
 ThisBuild / scalaVersion := "2.12.18"
 ThisBuild / crossScalaVersions := Seq("2.12.18", "2.13.12")
 

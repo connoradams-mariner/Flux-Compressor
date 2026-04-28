@@ -6,6 +6,55 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.3](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.2...v0.6.3) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** cargo-zigbuild + precise-builds for cargo-dist ([6589771](https://github.com/connoradams-mariner/Flux-Compressor/commit/6589771e1b485c5b86fab1892eb6b599ce53b44d))
+* **ci:** cargo-zigbuild + precise-builds for cargo-dist ([af7652e](https://github.com/connoradams-mariner/Flux-Compressor/commit/af7652ed38c8f1dc2f0d1212e21fe87456173f26))
+
+## [0.6.2](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.1...v0.6.2) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** use PAT for release-please so tags trigger downstream workflows ([7b9ea0d](https://github.com/connoradams-mariner/Flux-Compressor/commit/7b9ea0d24b219e7a88edea22a2ba0541c761e172))
+
+## [0.6.1](https://github.com/connoradams-mariner/Flux-Compressor/compare/v0.6.0...v0.6.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* **ci:** add cargo-dist [profile.dist] to workspace ([911de62](https://github.com/connoradams-mariner/Flux-Compressor/commit/911de621b9247dec141c199a4987666c94b261fe))
+* **ci:** drop component prefix from release-please tags ([9ac6797](https://github.com/connoradams-mariner/Flux-Compressor/commit/9ac6797e60e757c59ee538f2b3c3a1a960759502))
+
+## [0.6.0](https://github.com/connoradams-mariner/Flux-Compressor/compare/flux-compressor-v0.5.4...flux-compressor-v0.6.0) (2026-04-26)
+
+
+### Features
+
+* complete FluxCompress codebase (all 5 sprints) ([d224d0e](https://github.com/connoradams-mariner/Flux-Compressor/commit/d224d0e42406bd8ba69abb1d17415f4de8aae055))
+* concurrent writers ([f38d453](https://github.com/connoradams-mariner/Flux-Compressor/commit/f38d453a65cc2e4717f78452a147ea241d4e0779))
+* improve high cardinality string compression ([a0a719c](https://github.com/connoradams-mariner/Flux-Compressor/commit/a0a719cf1db33f2f75dfcf5aaf94011a7c58d2fb))
+
+
+### Bug Fixes
+
+* chunk compression and mmap decompress in python. feat: implement hidden partitioning and liquid clustering. ([3eb5680](https://github.com/connoradams-mariner/Flux-Compressor/commit/3eb5680eb4096e66593051eeb7b386f4834c5bc0))
+* **ci:** fix cargo-workspace limitation ([776cc9e](https://github.com/connoradams-mariner/Flux-Compressor/commit/776cc9e1319288268677c701ae8ce9cafd6c08ae))
+* **ci:** remove per-crate cargo-dist metadata blocks ([434b878](https://github.com/connoradams-mariner/Flux-Compressor/commit/434b8785d2da6dd3ff2ecaf68ebc3114848eb78a))
+* **ci:** remove per-crate cargo-dist metadata blocks ([a91671a](https://github.com/connoradams-mariner/Flux-Compressor/commit/a91671a3aafcf2f0d3b272a9af77bd7c7c410082))
+* fluxtable streaming ([3127195](https://github.com/connoradams-mariner/Flux-Compressor/commit/31271953d91a0e61fcecd66454f13ab0dc7ba672))
+* high cardinality string compression. combining cols of like types for compression ([ec7a5e8](https://github.com/connoradams-mariner/Flux-Compressor/commit/ec7a5e877252fd3d2e5d23df3ee4608e167c0737))
+* polars LargeUint8 type issue ([903a435](https://github.com/connoradams-mariner/Flux-Compressor/commit/903a435f59c41a3eddfdcb946cdaf3af1183e4f8))
+* release-type=simple ([57886a7](https://github.com/connoradams-mariner/Flux-Compressor/commit/57886a7a402f0603d959b5bda90db59b6c11ff17))
+
+
+### Documentation
+
+* **databricks:** document serverless compute support; add compute-tier matrix ([7ebb0d7](https://github.com/connoradams-mariner/Flux-Compressor/commit/7ebb0d7a14c28519728f57c8b7747642ec7787fa))
+
 ## [Unreleased]
 
 (No unreleased changes — see `v0.3.0` below.)
@@ -80,6 +129,51 @@ parity decompression throughput.
   and `compression_stats`.
 - `python/tests/conftest.py` shared session-scoped fixtures.
 - `python/tests/test_pandas.py` — full pandas integration test suite.
+- **Multi-format CLI I/O** — `fluxcapacitor compress` / `decompress` now
+  auto-detect the input/output format from the file extension and
+  support CSV, TSV, JSON, NDJSON/JSONL, Parquet, Arrow IPC/Feather, ORC,
+  and Excel (`.xlsx` read+write; `.xls`/`.xlsm`/`.ods` read-only).
+  Implementation in `crates/fluxcapacitor/src/formats.rs`, with
+  integration tests in `crates/fluxcapacitor/tests/formats_round_trip.rs`
+  and a Criterion benchmark in
+  `crates/fluxcapacitor/benches/file_formats.rs`.
+- **Reference Spark V2 connector** — `java/io/fluxcompress/spark/`
+  registers the `flux` short name and supports every common save mode:
+  - `FluxTable` advertises `BATCH_WRITE` + `TRUNCATE` +
+    `OVERWRITE_BY_FILTER` capabilities.
+  - `FluxWriteBuilder` implements `SupportsTruncate` and
+    `SupportsOverwriteV2` so `mode("overwrite")` and predicate-based
+    `replaceWhere` work correctly.
+  - `FluxTableProvider` implements `SupportsCatalogOptions`.
+  - `FluxCatalog` (`TableCatalog` + `SupportsNamespaces`) lets admins
+    register the connector as a Unity Catalog catalog via
+    `spark.sql.catalog.flux=io.fluxcompress.spark.FluxCatalog`.
+- **Connector tests** — `FluxConnectorTest.java` (JUnit 5, no Spark
+  required) covers the capability matrix, truncate-flag propagation,
+  catalog table lifecycle, and `FluxBatchWrite` commit semantics.
+  `python/tests/spark_uc_smoke_test.py` is the cluster-side integration
+  test that exercises CREATE / AppendData / SupportsTruncate /
+  SupportsOverwriteV2 / DROP through the registered catalog.
+
+### Fixed
+- **Float64 / wide-slab BitSlab corruption.** `BitWriter` /
+  `BitReader::read_value` / `simd::scalar::unpack_scalar` truncated
+  values whenever `slab_width + bit_off > 64` because they used a `u64`
+  shift window. Float64 columns (typical slab width 62–63) hit this
+  every time and round-tripped to denormals. Fixed by keeping the u64
+  fast path for `width + bit_off ≤ 64` and splitting the rare wide-slab
+  case across an 8-byte boundary (writer) / using a `u128` 9-byte window
+  (reader). Regression tests in
+  `crates/loom/src/bit_io.rs::tests::round_trip_wide_widths_all_alignments`
+  and `round_trip_float64_bit_pattern`.
+- **Multi-column null-row alignment.** `extract_column_data` previously
+  used `filter_map` to drop null rows, so columns with different null
+  counts ended up with different lengths and tripped Spark's
+  `Invalid argument error: all columns in a record batch must have the
+  same length` on decompress. Now reads the underlying value buffer
+  directly so every column produces exactly `arr.len()` u64 slots, with
+  `0` placeholders for null cells. Regression test in
+  `crates/fluxcapacitor/tests/formats_round_trip.rs::compress_then_decompress_multicol_with_mixed_nulls`.
 
 ### Fixed
 

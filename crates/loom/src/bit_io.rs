@@ -32,6 +32,11 @@ pub struct BitWriter {
     /// Target bit-width per value (1–64).
     width: u8,
     /// Accumulator for partial bytes.
+    ///
+    /// Stays a `u64` so the hot path keeps the project's u64-fast invariant.
+    /// The rare case where `bits_in_acc + width > 64` (only reachable for
+    /// `width ≥ 57`, e.g. Float64 BitSlab) is handled by a one-off split
+    /// inside [`write_value`] without widening the accumulator itself.
     accumulator: u64,
     /// Number of valid bits currently in `accumulator`.
     bits_in_acc: u8,
@@ -67,17 +72,42 @@ impl BitWriter {
     /// If `value` overflows the target bit-width (i.e., it is the sentinel),
     /// the caller should have already written the sentinel and stored the
     /// real value in the [`OutlierMap`][crate::outlier_map::OutlierMap].
+    #[inline]
     pub fn write_value(&mut self, value: u64) -> FluxResult<()> {
         let masked = value & self.sentinel_mask;
-        self.accumulator |= (masked as u64) << self.bits_in_acc;
-        self.bits_in_acc += self.width;
+        let bits_left = 64u8 - self.bits_in_acc;
 
-        // Drain full bytes from the accumulator.
-        while self.bits_in_acc >= 8 {
+        if self.width <= bits_left {
+            // ── u64 fast path (the overwhelmingly common case) ───────────
+            //  width ≤ 64 − bits_in_acc, so the shift never overflows.
+            self.accumulator |= masked << self.bits_in_acc;
+            self.bits_in_acc += self.width;
+            while self.bits_in_acc >= 8 {
+                self.buf.push((self.accumulator & 0xFF) as u8);
+                self.accumulator >>= 8;
+                self.bits_in_acc -= 8;
+            }
+            return Ok(());
+        }
+
+        // ── Slow path (width ≥ 57 *and* bits_in_acc > 0) ───────────────
+        // Split the value across an 8-byte boundary so we never need a
+        // u128 accumulator on the fast path. Reachable only for very wide
+        // BitSlab columns (e.g. Float64 with 63-bit deltas).
+        let lo_bits = bits_left;                  // bits to fill the u64
+        let hi_bits = self.width - bits_left;     // remaining bits
+        let lo_mask = (1u64 << lo_bits) - 1;      // safe: lo_bits ≤ 63
+        let lo = masked & lo_mask;
+        let hi = masked >> lo_bits;
+
+        self.accumulator |= lo << self.bits_in_acc;
+        // Accumulator is now full; drain all 8 bytes.
+        for _ in 0..8 {
             self.buf.push((self.accumulator & 0xFF) as u8);
             self.accumulator >>= 8;
-            self.bits_in_acc -= 8;
         }
+        self.accumulator = hi;
+        self.bits_in_acc = hi_bits;
         Ok(())
     }
 
@@ -90,6 +120,8 @@ impl BitWriter {
 
     /// Flush remaining bits (zero-padded to a full byte) and return the buffer.
     pub fn finish(mut self) -> Vec<u8> {
+        // After any `write_value`, `bits_in_acc ∈ 0..8`, so a single trailing
+        // byte is sufficient.
         if self.bits_in_acc > 0 {
             self.buf.push((self.accumulator & 0xFF) as u8);
         }
@@ -165,6 +197,7 @@ impl<'a> BitReader<'a> {
     /// Read the next `width`-bit value.
     ///
     /// Returns `None` when the stream is exhausted.
+    #[inline]
     pub fn read_value(&mut self) -> Option<u64> {
         let needed_bits = self.bit_pos + self.width as usize;
         let needed_bytes = (needed_bits + 7) / 8;
@@ -172,20 +205,35 @@ impl<'a> BitReader<'a> {
             return None;
         }
 
-        // Load up to 8 bytes from the current position.
         let byte_idx = self.bit_pos / 8;
-        let bit_off = (self.bit_pos % 8) as u64;
+        let bit_off = (self.bit_pos % 8) as u32;
+        let width = self.width as u32;
 
-        // Read up to 9 bytes to cover any 64-bit window starting mid-byte.
-        let mut raw: u64 = 0;
-        let take = ((self.width as usize + bit_off as usize + 7) / 8).min(8);
-        for i in 0..take {
-            if byte_idx + i < self.data.len() {
-                raw |= (self.data[byte_idx + i] as u64) << (i * 8);
+        let value = if width + bit_off <= 64 {
+            // ── u64 fast path ─────────────────────────────────────────────
+            // The value lives entirely within an 8-byte window starting at
+            // `byte_idx`, so a u64 holds it without truncation.
+            let take = (((width + bit_off + 7) / 8) as usize).min(8);
+            let mut raw: u64 = 0;
+            for i in 0..take {
+                if byte_idx + i < self.data.len() {
+                    raw |= (self.data[byte_idx + i] as u64) << (i * 8);
+                }
             }
-        }
-
-        let value = (raw >> bit_off) & self.mask;
+            (raw >> bit_off) & self.mask
+        } else {
+            // ── Slow path: u128 only when the value spans 9 bytes ────────
+            // Reached only for `width ≥ 57` with `bit_off > 0` (rare; e.g.
+            // Float64 BitSlab). Keeps the hot path on u64.
+            let take = (((width + bit_off + 7) / 8) as usize).min(9);
+            let mut raw: u128 = 0;
+            for i in 0..take {
+                if byte_idx + i < self.data.len() {
+                    raw |= (self.data[byte_idx + i] as u128) << (i * 8);
+                }
+            }
+            ((raw >> bit_off) as u64) & self.mask
+        };
         self.bit_pos += self.width as usize;
         Some(value)
     }
@@ -339,5 +387,65 @@ mod tests {
         let (w, _) = discover_width(&vals);
         // Outlier-map triggered: slab width ≤ 64 (the monster goes to OutlierMap).
         assert!(w <= 64);
+    }
+
+    /// Regression: widths ≥ 57 used to truncate values whenever the
+    /// accumulator (writer) or window (reader) was a `u64` and the value
+    /// straddled an 8-byte boundary. Cover every misalignment for widths
+    /// 57–64 to lock the fix in place.
+    #[test]
+    fn round_trip_wide_widths_all_alignments() {
+        for width in 57u8..=64 {
+            let max_val: u64 = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+            // Mix of representative values: 0, 1, max, an alternating bit pattern,
+            // and a few "high MSB" patterns that exercise the top bits.
+            let values: Vec<u64> = vec![
+                0,
+                1,
+                max_val,
+                max_val / 2,
+                max_val / 3,
+                max_val ^ (max_val >> 1),
+                if width == 64 { u64::MAX - 17 } else { max_val - 17 },
+                42,
+            ];
+
+            let mut w = BitWriter::new(width);
+            for &v in &values {
+                w.write_value(v).unwrap();
+            }
+            let buf = w.finish();
+
+            let mut r = BitReader::new(&buf, width);
+            for (i, &expected) in values.iter().enumerate() {
+                let got = r.read_value().unwrap();
+                assert_eq!(
+                    got, expected,
+                    "width={width} idx={i} expected {expected:#x} got {got:#x}",
+                );
+            }
+        }
+    }
+
+    /// Regression: feed the writer raw `f64::to_bits()` for an arithmetic
+    /// progression of doubles and confirm the original floats round-trip.
+    /// This is the exact pattern that broke `Float64` BitSlab decompression
+    /// before the wide-width split.
+    #[test]
+    fn round_trip_float64_bit_pattern() {
+        let values: Vec<u64> = (0..32).map(|i| ((i as f64) * 1.25).to_bits()).collect();
+        let (slab_width, _) = discover_width(
+            &values.iter().map(|&v| v as u128).collect::<Vec<_>>(),
+        );
+        let mut w = BitWriter::new(slab_width);
+        for &v in &values {
+            w.write_value(v).unwrap();
+        }
+        let buf = w.finish();
+
+        let mut r = BitReader::new(&buf, slab_width);
+        for &expected in &values {
+            assert_eq!(r.read_value().unwrap(), expected);
+        }
     }
 }

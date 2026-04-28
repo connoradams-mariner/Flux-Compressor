@@ -1636,170 +1636,102 @@ fn extract_column_data(array: &dyn Array, col_id: u16) -> FluxResult<ColumnData>
         FluxError::Internal(format!("unsupported Arrow data type for FluxWriter: {dt}"))
     })?;
 
-    // Extract dense (non-null) values as u64.
+    // Extract values as u64 with the **same length as the input array**.
+    //
+    // We deliberately do NOT drop null rows: doing so would leave columns
+    // with different null counts at different lengths, which then trip
+    // `RecordBatch::try_new`'s "all columns must have the same length"
+    // validation on the decompress side. Null positions get a 0 placeholder
+    // here; faithful null reconstruction will use `null_bitmap` (already
+    // captured above) when the v0.4 "null bitmap support" item lands.
+    //
+    // For primitive arrays we read the underlying value buffer directly via
+    // `arr.values()`, which is always exactly `arr.len()` long regardless
+    // of validity, keeping the hot path zero-copy and u64-native.
     let values_u64: Vec<u64> = match dt {
         DataType::UInt64 => {
             let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            if null_count == 0 {
-                arr.values().to_vec()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x)).collect()
-            }
+            arr.values().to_vec()
         }
         DataType::Int64 => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::UInt32 => {
             let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Int32 => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u32 as u64).collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| x as u32 as u64))
-                    .collect()
-            }
+            arr.values().iter().map(|&v| v as u32 as u64).collect()
         }
         DataType::Float64 => {
             let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&f| f.to_bits()).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x.to_bits())).collect()
-            }
+            arr.values().iter().map(|&f| f.to_bits()).collect()
         }
-        // ── Tier 1: new fixed-width types ────────────────────────────────
+        // ── Tier 1: new fixed-width types ───────────────────────────
         DataType::UInt8 => {
             let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::UInt16 => {
             let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Int8 => {
             let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u8 as u64).collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| x as u8 as u64))
-                    .collect()
-            }
+            arr.values().iter().map(|&v| v as u8 as u64).collect()
         }
         DataType::Int16 => {
             let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u16 as u64).collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| x as u16 as u64))
-                    .collect()
-            }
+            arr.values().iter().map(|&v| v as u16 as u64).collect()
         }
         DataType::Float32 => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&f| f.to_bits() as u64).collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| x.to_bits() as u64))
-                    .collect()
-            }
+            arr.values().iter().map(|&f| f.to_bits() as u64).collect()
         }
         DataType::Boolean => {
+            // BooleanArray is bit-packed; iterate by index. Null cells get 0.
             let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            if null_count == 0 {
-                (0..arr.len())
-                    .map(|i| if arr.value(i) { 1u64 } else { 0u64 })
-                    .collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| if x { 1u64 } else { 0u64 }))
-                    .collect()
-            }
+            (0..arr.len())
+                .map(|i| if arr.is_valid(i) && arr.value(i) { 1u64 } else { 0u64 })
+                .collect()
         }
         DataType::Date32 => {
             let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u32 as u64).collect()
-            } else {
-                arr.iter()
-                    .filter_map(|v| v.map(|x| x as u32 as u64))
-                    .collect()
-            }
+            arr.values().iter().map(|&v| v as u32 as u64).collect()
         }
         DataType::Date64 => {
             let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Timestamp(arrow_schema::TimeUnit::Second, _) => {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampSecondArray>()
                 .unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, _) => {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampMillisecondArray>()
                 .unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, _) => {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, _) => {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
                 .unwrap();
-            if null_count == 0 {
-                arr.values().iter().map(|&v| v as u64).collect()
-            } else {
-                arr.iter().filter_map(|v| v.map(|x| x as u64)).collect()
-            }
+            arr.values().iter().map(|&v| v as u64).collect()
         }
         _ => {
             return Err(FluxError::Internal(format!(
@@ -1807,6 +1739,11 @@ fn extract_column_data(array: &dyn Array, col_id: u16) -> FluxResult<ColumnData>
             )));
         }
     };
+
+    debug_assert_eq!(
+        values_u64.len(), row_count,
+        "extract_column_data must preserve row count for cross-column alignment",
+    );
 
     Ok(ColumnData {
         col_id,
