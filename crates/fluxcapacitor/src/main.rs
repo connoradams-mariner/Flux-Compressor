@@ -206,7 +206,9 @@ fn cmd_compress(input: &std::path::Path, output: &std::path::Path, strategy: &st
     let format = formats::FileFormat::from_path(input)?;
     tracing::info!(
         "Compressing {:?} ({}) → {:?}",
-        input, format.label(), output,
+        input,
+        format.label(),
+        output,
     );
 
     let batches = formats::load_batches(input)?;
@@ -253,8 +255,7 @@ fn cmd_decompress(input: &std::path::Path, output: &std::path::Path) -> Result<(
     use loom::{decompressors::flux_reader::FluxReader, traits::LoomDecompressor};
     use std::fs;
 
-    let flux_bytes = fs::read(input)
-        .map_err(|e| anyhow::anyhow!("reading {:?}: {e}", input))?;
+    let flux_bytes = fs::read(input).map_err(|e| anyhow::anyhow!("reading {:?}: {e}", input))?;
     let reader = FluxReader::new("value");
     let batch = reader.decompress_all(&flux_bytes)?;
 
@@ -263,7 +264,9 @@ fn cmd_decompress(input: &std::path::Path, output: &std::path::Path) -> Result<(
 
     println!(
         "Decompressed {} rows → {:?} ({})",
-        batch.num_rows(), output, format.label()
+        batch.num_rows(),
+        output,
+        format.label()
     );
     Ok(())
 }

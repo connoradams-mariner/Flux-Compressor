@@ -94,9 +94,9 @@ impl BitWriter {
         // Split the value across an 8-byte boundary so we never need a
         // u128 accumulator on the fast path. Reachable only for very wide
         // BitSlab columns (e.g. Float64 with 63-bit deltas).
-        let lo_bits = bits_left;                  // bits to fill the u64
-        let hi_bits = self.width - bits_left;     // remaining bits
-        let lo_mask = (1u64 << lo_bits) - 1;      // safe: lo_bits ≤ 63
+        let lo_bits = bits_left; // bits to fill the u64
+        let hi_bits = self.width - bits_left; // remaining bits
+        let lo_mask = (1u64 << lo_bits) - 1; // safe: lo_bits ≤ 63
         let lo = masked & lo_mask;
         let hi = masked >> lo_bits;
 
@@ -396,7 +396,11 @@ mod tests {
     #[test]
     fn round_trip_wide_widths_all_alignments() {
         for width in 57u8..=64 {
-            let max_val: u64 = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let max_val: u64 = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
             // Mix of representative values: 0, 1, max, an alternating bit pattern,
             // and a few "high MSB" patterns that exercise the top bits.
             let values: Vec<u64> = vec![
@@ -406,7 +410,11 @@ mod tests {
                 max_val / 2,
                 max_val / 3,
                 max_val ^ (max_val >> 1),
-                if width == 64 { u64::MAX - 17 } else { max_val - 17 },
+                if width == 64 {
+                    u64::MAX - 17
+                } else {
+                    max_val - 17
+                },
                 42,
             ];
 
@@ -434,9 +442,8 @@ mod tests {
     #[test]
     fn round_trip_float64_bit_pattern() {
         let values: Vec<u64> = (0..32).map(|i| ((i as f64) * 1.25).to_bits()).collect();
-        let (slab_width, _) = discover_width(
-            &values.iter().map(|&v| v as u128).collect::<Vec<_>>(),
-        );
+        let (slab_width, _) =
+            discover_width(&values.iter().map(|&v| v as u128).collect::<Vec<_>>());
         let mut w = BitWriter::new(slab_width);
         for &v in &values {
             w.write_value(v).unwrap();

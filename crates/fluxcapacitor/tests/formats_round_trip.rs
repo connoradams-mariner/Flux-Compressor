@@ -19,7 +19,7 @@ use arrow_array::*;
 use arrow_schema::{DataType, Field, Schema};
 use tempfile::TempDir;
 
-use fluxcapacitor::formats::{load_batches, save_batches, FileFormat};
+use fluxcapacitor::formats::{FileFormat, load_batches, save_batches};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -45,10 +45,10 @@ fn sample_batch(n: usize) -> RecordBatch {
     ));
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id",      DataType::Int64,   false),
+        Field::new("id", DataType::Int64, false),
         Field::new("revenue", DataType::Float64, false),
-        Field::new("region",  DataType::Utf8,    false),
-        Field::new("active",  DataType::Boolean, false),
+        Field::new("region", DataType::Utf8, false),
+        Field::new("active", DataType::Boolean, false),
     ]));
     RecordBatch::try_new(schema, vec![id, revenue, region, active]).unwrap()
 }
@@ -71,9 +71,17 @@ fn assert_shape(orig: &RecordBatch, got: &[RecordBatch]) {
         "column count mismatch"
     );
     let want: std::collections::BTreeSet<String> = orig
-        .schema().fields().iter().map(|f| f.name().to_string()).collect();
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     let have: std::collections::BTreeSet<String> = got[0]
-        .schema().fields().iter().map(|f| f.name().to_string()).collect();
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert_eq!(want, have, "column name set differs");
 }
 
@@ -116,8 +124,7 @@ fn run_round_trip(extension: &str, expect_format: FileFormat) {
     save_batches(&path, std::slice::from_ref(&original))
         .unwrap_or_else(|e| panic!("save_batches({extension}): {e}"));
 
-    let read = load_batches(&path)
-        .unwrap_or_else(|e| panic!("load_batches({extension}): {e}"));
+    let read = load_batches(&path).unwrap_or_else(|e| panic!("load_batches({extension}): {e}"));
     assert_shape(&original, &read);
 
     // Compare stringified content per named column so reorderings (e.g.
@@ -126,31 +133,46 @@ fn run_round_trip(extension: &str, expect_format: FileFormat) {
         let name = field.name();
         let lhs = stringify_named(std::slice::from_ref(&original), name);
         let rhs = stringify_named(&read, name);
-        assert_eq!(
-            lhs, rhs,
-            "{extension} column {:?} mismatch", name,
-        );
+        assert_eq!(lhs, rhs, "{extension} column {:?} mismatch", name,);
     }
 }
 
 #[test]
-fn round_trip_csv()      { run_round_trip("csv",      FileFormat::Csv); }
+fn round_trip_csv() {
+    run_round_trip("csv", FileFormat::Csv);
+}
 #[test]
-fn round_trip_tsv()      { run_round_trip("tsv",      FileFormat::Tsv); }
+fn round_trip_tsv() {
+    run_round_trip("tsv", FileFormat::Tsv);
+}
 #[test]
-fn round_trip_ndjson()   { run_round_trip("ndjson",   FileFormat::NdJson); }
+fn round_trip_ndjson() {
+    run_round_trip("ndjson", FileFormat::NdJson);
+}
 #[test]
-fn round_trip_jsonl()    { run_round_trip("jsonl",    FileFormat::NdJson); }
+fn round_trip_jsonl() {
+    run_round_trip("jsonl", FileFormat::NdJson);
+}
 #[test]
-fn round_trip_json()     { run_round_trip("json",     FileFormat::Json); }
+fn round_trip_json() {
+    run_round_trip("json", FileFormat::Json);
+}
 #[test]
-fn round_trip_parquet()  { run_round_trip("parquet",  FileFormat::Parquet); }
+fn round_trip_parquet() {
+    run_round_trip("parquet", FileFormat::Parquet);
+}
 #[test]
-fn round_trip_arrow_ipc(){ run_round_trip("arrow",    FileFormat::ArrowIpc); }
+fn round_trip_arrow_ipc() {
+    run_round_trip("arrow", FileFormat::ArrowIpc);
+}
 #[test]
-fn round_trip_feather()  { run_round_trip("feather",  FileFormat::ArrowIpc); }
+fn round_trip_feather() {
+    run_round_trip("feather", FileFormat::ArrowIpc);
+}
 #[test]
-fn round_trip_orc()      { run_round_trip("orc",      FileFormat::Orc); }
+fn round_trip_orc() {
+    run_round_trip("orc", FileFormat::Orc);
+}
 
 // XLSX is special: the writer is rust_xlsxwriter, the reader is calamine.
 // We test it on its own because the inferred Excel schema (Int64/Float64/
@@ -197,10 +219,13 @@ fn save_to_readonly_format_errors() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope.xls");
     let batch = sample_batch(4);
-    let err = save_batches(&path, std::slice::from_ref(&batch))
-        .expect_err("xls writes should fail");
+    let err =
+        save_batches(&path, std::slice::from_ref(&batch)).expect_err("xls writes should fail");
     let msg = format!("{err}");
-    assert!(msg.contains("read-only"), "expected read-only error, got {msg}");
+    assert!(
+        msg.contains("read-only"),
+        "expected read-only error, got {msg}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,8 +239,8 @@ fn compress_then_decompress_via_csv_pipeline() {
     use loom::traits::{LoomCompressor, LoomDecompressor};
 
     let tmp = TempDir::new().unwrap();
-    let csv_in   = tmp.path().join("input.csv");
-    let csv_out  = tmp.path().join("output.csv");
+    let csv_in = tmp.path().join("input.csv");
+    let csv_out = tmp.path().join("output.csv");
     let flux_bin = tmp.path().join("data.flux");
 
     // Mixed-type batch — exercises the multi-column flat-numeric path that
@@ -243,7 +268,8 @@ fn compress_then_decompress_via_csv_pipeline() {
         assert_eq!(
             stringify_named(std::slice::from_ref(&original), name),
             stringify_named(&result, name),
-            "column {:?} differs after CSV→flux→CSV round trip", name,
+            "column {:?} differs after CSV→flux→CSV round trip",
+            name,
         );
     }
 }
@@ -256,7 +282,7 @@ fn compress_then_decompress_via_csv_pipeline() {
 fn parquet_to_csv_conversion() {
     let tmp = TempDir::new().unwrap();
     let parquet_path = tmp.path().join("input.parquet");
-    let csv_path     = tmp.path().join("output.csv");
+    let csv_path = tmp.path().join("output.csv");
 
     let original = sample_batch(50);
     save_batches(&parquet_path, std::slice::from_ref(&original)).unwrap();
@@ -290,7 +316,13 @@ fn compress_then_decompress_multicol_with_mixed_nulls() {
     // Column B (Float64): different null pattern — every 7th row.
     let revenue: ArrayRef = Arc::new(Float64Array::from(
         (0..n)
-            .map(|i| if i % 7 == 0 { None } else { Some((i as f64) * 1.25) })
+            .map(|i| {
+                if i % 7 == 0 {
+                    None
+                } else {
+                    Some((i as f64) * 1.25)
+                }
+            })
             .collect::<Vec<_>>(),
     ));
     // Column C (Boolean): every 3rd row null — yet another distinct count.
@@ -301,9 +333,9 @@ fn compress_then_decompress_multicol_with_mixed_nulls() {
     ));
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id",      DataType::Int64,   true),
+        Field::new("id", DataType::Int64, true),
         Field::new("revenue", DataType::Float64, true),
-        Field::new("active",  DataType::Boolean, true),
+        Field::new("active", DataType::Boolean, true),
     ]));
     let original = RecordBatch::try_new(schema, vec![id, revenue, active]).unwrap();
 

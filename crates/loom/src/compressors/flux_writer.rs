@@ -1694,7 +1694,13 @@ fn extract_column_data(array: &dyn Array, col_id: u16) -> FluxResult<ColumnData>
             // BooleanArray is bit-packed; iterate by index. Null cells get 0.
             let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             (0..arr.len())
-                .map(|i| if arr.is_valid(i) && arr.value(i) { 1u64 } else { 0u64 })
+                .map(|i| {
+                    if arr.is_valid(i) && arr.value(i) {
+                        1u64
+                    } else {
+                        0u64
+                    }
+                })
                 .collect()
         }
         DataType::Date32 => {
@@ -1741,7 +1747,8 @@ fn extract_column_data(array: &dyn Array, col_id: u16) -> FluxResult<ColumnData>
     };
 
     debug_assert_eq!(
-        values_u64.len(), row_count,
+        values_u64.len(),
+        row_count,
         "extract_column_data must preserve row count for cross-column alignment",
     );
 

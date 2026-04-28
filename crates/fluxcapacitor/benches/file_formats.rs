@@ -16,15 +16,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 
-use arrow_array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
-};
+use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 
-use fluxcapacitor::formats::{load_batches, save_batches, FileFormat};
+use fluxcapacitor::formats::{FileFormat, load_batches, save_batches};
 use loom::compressors::flux_writer::FluxWriter;
 use loom::traits::LoomCompressor;
 
@@ -52,17 +50,21 @@ fn mixed_batch(rows: usize) -> RecordBatch {
     ));
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id",      DataType::Int64,   false),
+        Field::new("id", DataType::Int64, false),
         Field::new("revenue", DataType::Float64, false),
-        Field::new("region",  DataType::Utf8,    false),
-        Field::new("active",  DataType::Boolean, false),
+        Field::new("region", DataType::Utf8, false),
+        Field::new("active", DataType::Boolean, false),
     ]));
     RecordBatch::try_new(schema, vec![id, revenue, region, active]).unwrap()
 }
 
 /// Approximate raw size in bytes of a `RecordBatch` (sum of column buffers).
 fn raw_size(batch: &RecordBatch) -> usize {
-    batch.columns().iter().map(|c| c.get_array_memory_size()).sum()
+    batch
+        .columns()
+        .iter()
+        .map(|c| c.get_array_memory_size())
+        .sum()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,14 +78,14 @@ const ROWS: usize = 50_000;
 /// them.
 fn write_formats() -> Vec<(&'static str, FileFormat)> {
     vec![
-        ("csv",      FileFormat::Csv),
-        ("tsv",      FileFormat::Tsv),
-        ("ndjson",   FileFormat::NdJson),
-        ("json",     FileFormat::Json),
-        ("parquet",  FileFormat::Parquet),
-        ("arrow",    FileFormat::ArrowIpc),
-        ("orc",      FileFormat::Orc),
-        ("xlsx",     FileFormat::Xlsx),
+        ("csv", FileFormat::Csv),
+        ("tsv", FileFormat::Tsv),
+        ("ndjson", FileFormat::NdJson),
+        ("json", FileFormat::Json),
+        ("parquet", FileFormat::Parquet),
+        ("arrow", FileFormat::ArrowIpc),
+        ("orc", FileFormat::Orc),
+        ("xlsx", FileFormat::Xlsx),
     ]
 }
 

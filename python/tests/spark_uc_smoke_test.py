@@ -29,8 +29,14 @@ If every assertion passes, all three of the original errors
 
 from __future__ import annotations
 
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
+import pytest
+
+# This is a manual smoke test that talks to a live Databricks/UC cluster.
+# CI environments don't ship `pyspark`, so skip cleanly during collection
+# rather than hard-failing pytest's import phase.
+pyspark = pytest.importorskip("pyspark")
+from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 
 
 def main(catalog: str = "flux", namespace: str = "default", table: str = "smoke") -> None:

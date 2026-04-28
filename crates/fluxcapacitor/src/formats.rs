@@ -26,9 +26,9 @@ use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use arrow_array::*;
+use anyhow::{Context, Result, anyhow, bail};
 use arrow_array::builder::*;
+use arrow_array::*;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,24 +72,27 @@ impl FileFormat {
             .ok_or_else(|| anyhow!("file {:?} has no extension", path))?
             .to_ascii_lowercase();
         Self::from_extension(&ext).with_context(|| {
-            format!("unsupported file format for {:?} (extension {:?})", path, ext)
+            format!(
+                "unsupported file format for {:?} (extension {:?})",
+                path, ext
+            )
         })
     }
 
     /// Detect a format from a bare extension (without the leading dot).
     pub fn from_extension(ext: &str) -> Result<Self> {
         Ok(match ext {
-            "csv"                          => Self::Csv,
-            "tsv" | "tab"                  => Self::Tsv,
-            "ndjson" | "jsonl"             => Self::NdJson,
-            "json"                         => Self::Json,
-            "parquet" | "pq"               => Self::Parquet,
-            "arrow" | "ipc" | "feather"    => Self::ArrowIpc,
-            "orc"                          => Self::Orc,
-            "xlsx"                         => Self::Xlsx,
-            "xls"                          => Self::Xls,
-            "xlsm"                         => Self::Xlsm,
-            "ods"                          => Self::Ods,
+            "csv" => Self::Csv,
+            "tsv" | "tab" => Self::Tsv,
+            "ndjson" | "jsonl" => Self::NdJson,
+            "json" => Self::Json,
+            "parquet" | "pq" => Self::Parquet,
+            "arrow" | "ipc" | "feather" => Self::ArrowIpc,
+            "orc" => Self::Orc,
+            "xlsx" => Self::Xlsx,
+            "xls" => Self::Xls,
+            "xlsm" => Self::Xlsm,
+            "ods" => Self::Ods,
             _ => bail!("unknown extension '{ext}'"),
         })
     }
@@ -102,17 +105,17 @@ impl FileFormat {
     /// Human-readable label used in error messages and benchmark output.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Csv      => "CSV",
-            Self::Tsv      => "TSV",
-            Self::NdJson   => "NDJSON",
-            Self::Json     => "JSON",
-            Self::Parquet  => "Parquet",
+            Self::Csv => "CSV",
+            Self::Tsv => "TSV",
+            Self::NdJson => "NDJSON",
+            Self::Json => "JSON",
+            Self::Parquet => "Parquet",
             Self::ArrowIpc => "Arrow IPC",
-            Self::Orc      => "ORC",
-            Self::Xlsx     => "Excel (xlsx)",
-            Self::Xls      => "Excel (xls)",
-            Self::Xlsm     => "Excel (xlsm)",
-            Self::Ods      => "OpenDocument (ods)",
+            Self::Orc => "ORC",
+            Self::Xlsx => "Excel (xlsx)",
+            Self::Xls => "Excel (xls)",
+            Self::Xlsm => "Excel (xlsm)",
+            Self::Ods => "OpenDocument (ods)",
         }
     }
 }
@@ -126,17 +129,14 @@ impl FileFormat {
 pub fn load_batches(path: &Path) -> Result<Vec<RecordBatch>> {
     let format = FileFormat::from_path(path)?;
     match format {
-        FileFormat::Csv      => load_csv(path, b','),
-        FileFormat::Tsv      => load_csv(path, b'\t'),
-        FileFormat::NdJson   => load_ndjson(path),
-        FileFormat::Json     => load_json_array(path),
-        FileFormat::Parquet  => load_parquet(path),
+        FileFormat::Csv => load_csv(path, b','),
+        FileFormat::Tsv => load_csv(path, b'\t'),
+        FileFormat::NdJson => load_ndjson(path),
+        FileFormat::Json => load_json_array(path),
+        FileFormat::Parquet => load_parquet(path),
         FileFormat::ArrowIpc => load_arrow_ipc(path),
-        FileFormat::Orc      => load_orc(path),
-        FileFormat::Xlsx
-        | FileFormat::Xls
-        | FileFormat::Xlsm
-        | FileFormat::Ods    => load_excel(path),
+        FileFormat::Orc => load_orc(path),
+        FileFormat::Xlsx | FileFormat::Xls | FileFormat::Xlsm | FileFormat::Ods => load_excel(path),
     }
 }
 
@@ -153,14 +153,14 @@ pub fn save_batches(path: &Path, batches: &[RecordBatch]) -> Result<()> {
         );
     }
     match format {
-        FileFormat::Csv      => save_csv(path, batches, b','),
-        FileFormat::Tsv      => save_csv(path, batches, b'\t'),
-        FileFormat::NdJson   => save_ndjson(path, batches),
-        FileFormat::Json     => save_json_array(path, batches),
-        FileFormat::Parquet  => save_parquet(path, batches),
+        FileFormat::Csv => save_csv(path, batches, b','),
+        FileFormat::Tsv => save_csv(path, batches, b'\t'),
+        FileFormat::NdJson => save_ndjson(path, batches),
+        FileFormat::Json => save_json_array(path, batches),
+        FileFormat::Parquet => save_parquet(path, batches),
         FileFormat::ArrowIpc => save_arrow_ipc(path, batches),
-        FileFormat::Orc      => save_orc(path, batches),
-        FileFormat::Xlsx     => save_xlsx(path, batches),
+        FileFormat::Orc => save_orc(path, batches),
+        FileFormat::Xlsx => save_xlsx(path, batches),
         _ => unreachable!("read-only formats handled above"),
     }
 }
@@ -170,11 +170,10 @@ pub fn save_batches(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn load_csv(path: &Path, delimiter: u8) -> Result<Vec<RecordBatch>> {
-    use arrow::csv::reader::Format;
     use arrow::csv::ReaderBuilder;
+    use arrow::csv::reader::Format;
 
-    let file = File::open(path)
-        .with_context(|| format!("opening {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let mut reader = BufReader::new(file);
 
     let format = Format::default()
@@ -198,8 +197,7 @@ fn load_csv(path: &Path, delimiter: u8) -> Result<Vec<RecordBatch>> {
 
 fn save_csv(path: &Path, batches: &[RecordBatch], delimiter: u8) -> Result<()> {
     use arrow::csv::WriterBuilder;
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let mut writer = WriterBuilder::new()
         .with_header(true)
         .with_delimiter(delimiter)
@@ -215,11 +213,10 @@ fn save_csv(path: &Path, batches: &[RecordBatch], delimiter: u8) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn load_ndjson(path: &Path) -> Result<Vec<RecordBatch>> {
-    use arrow::json::reader::infer_json_schema_from_seekable;
     use arrow::json::ReaderBuilder;
+    use arrow::json::reader::infer_json_schema_from_seekable;
 
-    let file = File::open(path)
-        .with_context(|| format!("opening {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let mut reader = BufReader::new(file);
 
     let (schema, _) = infer_json_schema_from_seekable(&mut reader, Some(100))
@@ -237,10 +234,9 @@ fn load_ndjson(path: &Path) -> Result<Vec<RecordBatch>> {
 /// Read a JSON document containing a top-level array of records, e.g.
 /// `[{"a": 1}, {"a": 2}]`. Internally this is reshaped into NDJSON.
 fn load_json_array(path: &Path) -> Result<Vec<RecordBatch>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {:?}", path))?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing JSON {:?}", path))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {:?}", path))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("parsing JSON {:?}", path))?;
 
     let array = match parsed {
         serde_json::Value::Array(items) => items,
@@ -265,8 +261,7 @@ fn load_json_array(path: &Path) -> Result<Vec<RecordBatch>> {
 
 fn save_ndjson(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     use arrow::json::LineDelimitedWriter;
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let mut writer = LineDelimitedWriter::new(BufWriter::new(file));
     for batch in batches {
         writer.write(batch)?;
@@ -277,8 +272,7 @@ fn save_ndjson(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 
 fn save_json_array(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     use arrow::json::ArrayWriter;
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let mut writer = ArrayWriter::new(BufWriter::new(file));
     for batch in batches {
         writer.write(batch)?;
@@ -293,8 +287,7 @@ fn save_json_array(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 
 fn load_parquet(path: &Path) -> Result<Vec<RecordBatch>> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let file = File::open(path)
-        .with_context(|| format!("opening {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
     let mut batches = Vec::new();
     for b in reader {
@@ -309,8 +302,7 @@ fn save_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     use parquet::file::properties::WriterProperties;
 
     let schema = batches[0].schema();
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let props = WriterProperties::builder()
         .set_compression(Compression::SNAPPY)
         .build();
@@ -328,8 +320,7 @@ fn save_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 
 fn load_arrow_ipc(path: &Path) -> Result<Vec<RecordBatch>> {
     use arrow::ipc::reader::FileReader;
-    let file = File::open(path)
-        .with_context(|| format!("opening {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let reader = FileReader::try_new(file, None)?;
     let mut batches = Vec::new();
     for b in reader {
@@ -341,8 +332,7 @@ fn load_arrow_ipc(path: &Path) -> Result<Vec<RecordBatch>> {
 fn save_arrow_ipc(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     use arrow::ipc::writer::FileWriter;
     let schema = batches[0].schema();
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let mut writer = FileWriter::try_new(file, schema.as_ref())?;
     for batch in batches {
         writer.write(batch)?;
@@ -356,8 +346,7 @@ fn save_arrow_ipc(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn load_orc(path: &Path) -> Result<Vec<RecordBatch>> {
-    let file = File::open(path)
-        .with_context(|| format!("opening {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("opening {:?}", path))?;
     let reader = orc_rust::ArrowReaderBuilder::try_new(file)?.build();
     let mut batches = Vec::new();
     for b in reader {
@@ -368,8 +357,7 @@ fn load_orc(path: &Path) -> Result<Vec<RecordBatch>> {
 
 fn save_orc(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     let schema = batches[0].schema();
-    let file = File::create(path)
-        .with_context(|| format!("creating {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("creating {:?}", path))?;
     let mut writer = orc_rust::ArrowWriterBuilder::new(file, schema).try_build()?;
     for batch in batches {
         writer.write(batch)?;
@@ -383,10 +371,10 @@ fn save_orc(path: &Path, batches: &[RecordBatch]) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn load_excel(path: &Path) -> Result<Vec<RecordBatch>> {
-    use calamine::{open_workbook_auto, Data, Range, Reader};
+    use calamine::{Data, Range, Reader, open_workbook_auto};
 
-    let mut workbook = open_workbook_auto(path)
-        .with_context(|| format!("opening Excel workbook {:?}", path))?;
+    let mut workbook =
+        open_workbook_auto(path).with_context(|| format!("opening Excel workbook {:?}", path))?;
     let sheet_names = workbook.sheet_names().to_vec();
     let first = sheet_names
         .first()
@@ -449,11 +437,11 @@ impl ColumnKind {
         use calamine::Data;
         match c {
             Data::Empty | Data::Error(_) => Self::Empty,
-            Data::Bool(_)                => Self::Bool,
-            Data::Int(_)                 => Self::Int,
+            Data::Bool(_) => Self::Bool,
+            Data::Int(_) => Self::Int,
             Data::Float(f) if f.fract() == 0.0 && f.is_finite() => Self::Int,
-            Data::Float(_)               => Self::Float,
-            Data::DateTime(_)            => Self::Float,
+            Data::Float(_) => Self::Float,
+            Data::DateTime(_) => Self::Float,
             Data::String(_) | Data::DateTimeIso(_) | Data::DurationIso(_) => Self::String,
         }
     }
@@ -474,9 +462,9 @@ impl ColumnKind {
     fn arrow_type(self) -> DataType {
         match self {
             Self::Empty | Self::String => DataType::Utf8,
-            Self::Bool                 => DataType::Boolean,
-            Self::Int                  => DataType::Int64,
-            Self::Float                => DataType::Float64,
+            Self::Bool => DataType::Boolean,
+            Self::Int => DataType::Int64,
+            Self::Float => DataType::Float64,
         }
     }
 }
@@ -498,8 +486,8 @@ fn build_excel_column(
                     Data::Bool(v) => b.append_value(*v),
                     Data::Empty | Data::Error(_) => b.append_null(),
                     Data::String(s) => b.append_value(s.eq_ignore_ascii_case("true")),
-                    Data::Int(v)    => b.append_value(*v != 0),
-                    Data::Float(v)  => b.append_value(*v != 0.0),
+                    Data::Int(v) => b.append_value(*v != 0),
+                    Data::Float(v) => b.append_value(*v != 0.0),
                     _ => b.append_null(),
                 }
             }
@@ -523,10 +511,10 @@ fn build_excel_column(
             for row in body {
                 let cell = row.get(col).unwrap_or(&Data::Empty);
                 match cell {
-                    Data::Float(v)    => b.append_value(*v),
-                    Data::Int(v)      => b.append_value(*v as f64),
+                    Data::Float(v) => b.append_value(*v),
+                    Data::Int(v) => b.append_value(*v as f64),
                     Data::DateTime(d) => b.append_value(d.as_f64()),
-                    Data::Bool(v)     => b.append_value(if *v { 1.0 } else { 0.0 }),
+                    Data::Bool(v) => b.append_value(if *v { 1.0 } else { 0.0 }),
                     _ => b.append_null(),
                 }
             }
@@ -538,13 +526,13 @@ fn build_excel_column(
                 let cell = row.get(col).unwrap_or(&Data::Empty);
                 match cell {
                     Data::Empty | Data::Error(_) => b.append_null(),
-                    Data::String(s)              => b.append_value(s),
-                    Data::Int(v)                 => b.append_value(v.to_string()),
-                    Data::Float(v)               => b.append_value(v.to_string()),
-                    Data::Bool(v)                => b.append_value(v.to_string()),
-                    Data::DateTime(v)            => b.append_value(v.as_f64().to_string()),
-                    Data::DateTimeIso(s)         => b.append_value(s),
-                    Data::DurationIso(s)         => b.append_value(s),
+                    Data::String(s) => b.append_value(s),
+                    Data::Int(v) => b.append_value(v.to_string()),
+                    Data::Float(v) => b.append_value(v.to_string()),
+                    Data::Bool(v) => b.append_value(v.to_string()),
+                    Data::DateTime(v) => b.append_value(v.as_f64().to_string()),
+                    Data::DateTimeIso(s) => b.append_value(s),
+                    Data::DurationIso(s) => b.append_value(s),
                 }
             }
             // Silence the unused-arg lint when n_cols is irrelevant.
@@ -578,8 +566,7 @@ fn save_xlsx(path: &Path, batches: &[RecordBatch]) -> Result<()> {
         row_offset += n_rows;
     }
 
-    wb.save(path)
-        .map_err(|e| anyhow!("xlsx save: {e}"))?;
+    wb.save(path).map_err(|e| anyhow!("xlsx save: {e}"))?;
     Ok(())
 }
 
@@ -721,12 +708,27 @@ mod tests {
     fn detects_format_from_extension() {
         assert_eq!(FileFormat::from_extension("csv").unwrap(), FileFormat::Csv);
         assert_eq!(FileFormat::from_extension("tsv").unwrap(), FileFormat::Tsv);
-        assert_eq!(FileFormat::from_extension("ndjson").unwrap(), FileFormat::NdJson);
-        assert_eq!(FileFormat::from_extension("json").unwrap(), FileFormat::Json);
-        assert_eq!(FileFormat::from_extension("parquet").unwrap(), FileFormat::Parquet);
-        assert_eq!(FileFormat::from_extension("arrow").unwrap(), FileFormat::ArrowIpc);
+        assert_eq!(
+            FileFormat::from_extension("ndjson").unwrap(),
+            FileFormat::NdJson
+        );
+        assert_eq!(
+            FileFormat::from_extension("json").unwrap(),
+            FileFormat::Json
+        );
+        assert_eq!(
+            FileFormat::from_extension("parquet").unwrap(),
+            FileFormat::Parquet
+        );
+        assert_eq!(
+            FileFormat::from_extension("arrow").unwrap(),
+            FileFormat::ArrowIpc
+        );
         assert_eq!(FileFormat::from_extension("orc").unwrap(), FileFormat::Orc);
-        assert_eq!(FileFormat::from_extension("xlsx").unwrap(), FileFormat::Xlsx);
+        assert_eq!(
+            FileFormat::from_extension("xlsx").unwrap(),
+            FileFormat::Xlsx
+        );
         assert_eq!(FileFormat::from_extension("ods").unwrap(), FileFormat::Ods);
         assert!(FileFormat::from_extension("docx").is_err());
     }
@@ -734,8 +736,14 @@ mod tests {
     #[test]
     fn write_capability_matrix() {
         for f in [
-            FileFormat::Csv, FileFormat::Tsv, FileFormat::Json, FileFormat::NdJson,
-            FileFormat::Parquet, FileFormat::ArrowIpc, FileFormat::Orc, FileFormat::Xlsx,
+            FileFormat::Csv,
+            FileFormat::Tsv,
+            FileFormat::Json,
+            FileFormat::NdJson,
+            FileFormat::Parquet,
+            FileFormat::ArrowIpc,
+            FileFormat::Orc,
+            FileFormat::Xlsx,
         ] {
             assert!(f.supports_write(), "{:?} should be writable", f);
         }
