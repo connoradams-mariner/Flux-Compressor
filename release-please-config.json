@@ -1,0 +1,77 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+
+  "release-type": "simple",
+
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "flux-compressor",
+      "component": "flux-compressor",
+      "include-v-in-tag": true,
+      "include-component-in-tag": false,
+      "changelog-path": "CHANGELOG.md",
+      "changelog-sections": [
+        { "type": "feat",     "section": "Features" },
+        { "type": "fix",      "section": "Bug Fixes" },
+        { "type": "perf",     "section": "Performance" },
+        { "type": "revert",   "section": "Reverts" },
+        { "type": "docs",     "section": "Documentation", "hidden": false },
+        { "type": "build",    "section": "Build",       "hidden": true  },
+        { "type": "ci",       "section": "CI",          "hidden": true  },
+        { "type": "chore",    "section": "Chores",      "hidden": true  },
+        { "type": "refactor", "section": "Refactors",   "hidden": true  },
+        { "type": "test",     "section": "Tests",       "hidden": true  },
+        { "type": "style",    "section": "Style",       "hidden": true  }
+      ],
+
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.loom.version"
+        },
+        {
+          "type": "toml",
+          "path": "pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "generic",
+          "path": "spark-connector/build.sbt"
+        },
+        {
+          "type": "generic",
+          "path": "crates/loom/README.md"
+        },
+        {
+          "type": "generic",
+          "path": "crates/jni-bridge/README.md"
+        },
+        {
+          "type": "generic",
+          "path": "crates/fluxcapacitor/README.md"
+        },
+        {
+          "type": "generic",
+          "path": "crates/python/README.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/databricks.md"
+        },
+        {
+          "type": "generic",
+          "path": "README.md"
+        }
+      ]
+    }
+  },
+
+  "plugins": []
+}

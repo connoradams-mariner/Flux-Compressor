@@ -59,6 +59,14 @@ from fluxcompress._fluxcompress import (  # noqa: F401
     FileInfo,
     FluxBuffer,
     FluxBatchReader,
+    # Stateful writer with dict cache
+    FluxWriter,
+    # Phase F: schema-evolution classes
+    SchemaField,
+    TableSchema,
+    EvolveOptions,
+    FluxScan,
+    FluxTable,
     # Core functions
     compress,
     decompress,
@@ -81,6 +89,17 @@ from fluxcompress._polars import (  # noqa: F401
     optimize,
 )
 
+from fluxcompress._table_writer import (  # noqa: F401
+    FluxTableWriter,
+    TableExistsError,
+    CommitConflictError,
+    ConcurrentOperationError,
+    LogForkError,
+    ProtocolVersionError,
+    FLUX_TABLE_READER_VERSION,
+    FLUX_TABLE_WRITER_VERSION,
+)
+
 # pandas helpers are imported lazily in fluxcompress.pandas to avoid a hard
 # dependency.  Re-export the submodule reference so users can do:
 #   import fluxcompress.pandas as fcp
@@ -94,6 +113,14 @@ __all__ = [
     "BlockInfo",
     "FileInfo",
     "FluxBuffer",
+    # Stateful writer with dict cache
+    "FluxWriter",
+    # Phase F: schema-evolution classes
+    "SchemaField",
+    "TableSchema",
+    "EvolveOptions",
+    "FluxScan",
+    "FluxTable",
     # Core functions
     "compress",
     "decompress",
@@ -108,6 +135,15 @@ __all__ = [
     "scan_flux",
     "write_flux_table",
     "optimize",
+    # Streaming writer (works with Polars, PySpark, PyArrow, pandas)
+    "FluxTableWriter",
+    "TableExistsError",
+    "CommitConflictError",
+    "ConcurrentOperationError",
+    "LogForkError",
+    "ProtocolVersionError",
+    "FLUX_TABLE_READER_VERSION",
+    "FLUX_TABLE_WRITER_VERSION",
     # Batch reader
     "FluxBatchReader",
     # Submodules

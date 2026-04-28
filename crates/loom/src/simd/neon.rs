@@ -9,23 +9,18 @@
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
-use crate::error::FluxResult;
 use super::scalar::unpack_scalar;
+use crate::error::FluxResult;
 
 /// # Safety
 /// Must be called only on AArch64 targets (NEON is always available there).
 #[cfg(target_arch = "aarch64")]
-pub unsafe fn unpack_neon(
-    slab: &[u8],
-    width: u8,
-    count: usize,
-    out: &mut [u64],
-) -> FluxResult<()> {
+pub unsafe fn unpack_neon(slab: &[u8], width: u8, count: usize, out: &mut [u64]) -> FluxResult<()> {
     match width {
-        8  => unpack_8bit_neon(slab, count, out),
+        8 => unpack_8bit_neon(slab, count, out),
         16 => unpack_16bit_neon(slab, count, out),
         32 => unpack_32bit_neon(slab, count, out),
-        _  => unpack_scalar(slab, width, count, out),
+        _ => unpack_scalar(slab, width, count, out),
     }
 }
 
@@ -35,8 +30,8 @@ unsafe fn unpack_8bit_neon(slab: &[u8], count: usize, out: &mut [u64]) -> FluxRe
     while i + 16 <= count {
         let v = vld1q_u8(slab.as_ptr().add(i));
         // Widen u8x16 → u64x16 via vmovl chains.
-        let lo8  = vget_low_u8(v);
-        let hi8  = vget_high_u8(v);
+        let lo8 = vget_low_u8(v);
+        let hi8 = vget_high_u8(v);
         let lo16 = vmovl_u8(lo8);
         let hi16 = vmovl_u8(hi8);
         let lo32_lo = vmovl_u16(vget_low_u16(lo16));
@@ -45,10 +40,10 @@ unsafe fn unpack_8bit_neon(slab: &[u8], count: usize, out: &mut [u64]) -> FluxRe
         let hi32_hi = vmovl_u16(vget_high_u16(hi16));
 
         // Widen u32x4 → u64x4 and store.
-        store_u32x4_as_u64(&out[i..],     vmovl_u32(vget_low_u32(lo32_lo)));
+        store_u32x4_as_u64(&out[i..], vmovl_u32(vget_low_u32(lo32_lo)));
         store_u32x4_as_u64(&out[i + 4..], vmovl_u32(vget_high_u32(lo32_lo)));
         store_u32x4_as_u64(&out[i + 8..], vmovl_u32(vget_low_u32(lo32_hi)));
-        store_u32x4_as_u64(&out[i + 12..],vmovl_u32(vget_high_u32(lo32_hi)));
+        store_u32x4_as_u64(&out[i + 12..], vmovl_u32(vget_high_u32(lo32_hi)));
         let _ = (hi32_lo, hi32_hi); // used in next iteration via hi8 path below
 
         // Repeat for hi8 half (values 8..16).
@@ -77,8 +72,12 @@ unsafe fn store_u32x4_as_u64(out: &[u64], v: uint64x2_t) {
     let mut tmp = [0u64; 2];
     vst1q_u64(tmp.as_mut_ptr(), v);
     // We can't write directly to a slice reference in unsafe, so use ptr.
-    if out.len() >= 1 { *(out.as_ptr() as *mut u64) = tmp[0]; }
-    if out.len() >= 2 { *(out.as_ptr().add(1) as *mut u64) = tmp[1]; }
+    if out.len() >= 1 {
+        *(out.as_ptr() as *mut u64) = tmp[0];
+    }
+    if out.len() >= 2 {
+        *(out.as_ptr().add(1) as *mut u64) = tmp[1];
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -93,7 +92,7 @@ unsafe fn unpack_16bit_neon(slab: &[u8], count: usize, out: &mut [u64]) -> FluxR
         let hi64_lo = vmovl_u32(vget_low_u32(hi));
         let hi64_hi = vmovl_u32(vget_high_u32(hi));
 
-        vst1q_u64(out.as_mut_ptr().add(i)     as *mut u64, lo64_lo);
+        vst1q_u64(out.as_mut_ptr().add(i) as *mut u64, lo64_lo);
         vst1q_u64(out.as_mut_ptr().add(i + 2) as *mut u64, lo64_hi);
         vst1q_u64(out.as_mut_ptr().add(i + 4) as *mut u64, hi64_lo);
         vst1q_u64(out.as_mut_ptr().add(i + 6) as *mut u64, hi64_hi);
@@ -112,7 +111,7 @@ unsafe fn unpack_32bit_neon(slab: &[u8], count: usize, out: &mut [u64]) -> FluxR
         let v = vld1q_u32(slab.as_ptr().add(i * 4) as *const u32);
         let lo = vmovl_u32(vget_low_u32(v));
         let hi = vmovl_u32(vget_high_u32(v));
-        vst1q_u64(out.as_mut_ptr().add(i)     as *mut u64, lo);
+        vst1q_u64(out.as_mut_ptr().add(i) as *mut u64, lo);
         vst1q_u64(out.as_mut_ptr().add(i + 2) as *mut u64, hi);
         i += 4;
     }

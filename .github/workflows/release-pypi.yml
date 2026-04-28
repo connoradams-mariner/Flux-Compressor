@@ -1,0 +1,148 @@
+# Publish `fluxcompress` to PyPI on version tags.
+#
+# Trigger: tags of the form `vX.Y.Z`.
+#
+# This workflow uses `PyO3/maturin-action` to cross-compile wheels for
+# the major platform matrix Databricks, Kaggle, Colab, and vanilla
+# macOS / Windows environments care about:
+#
+#   Linux    x86_64         (manylinux 2_17)
+#   Linux    aarch64        (manylinux 2_17, via cross)
+#   macOS    x86_64         (runner: macos-14, cross-compiled from arm64)
+#   macOS    arm64          (runner: macos-14 / Apple Silicon, native)
+#   Windows  x86_64         (runner: windows-latest)
+#
+# Each wheel targets abi3-py38 (Stable ABI) so a single wheel covers
+# every supported Python minor version.  The source distribution is
+# built separately and uploaded alongside the wheels.
+#
+# Required secrets:
+#   * PYPI_API_TOKEN  (https://pypi.org/manage/account/token/)
+
+name: release-pypi
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  linux:
+    name: Build wheel — Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # `auto` picks the oldest manylinux that satisfies the build.
+          manylinux: auto
+          args: --release --out dist --manifest-path crates/python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  macos:
+    name: Build wheel — macOS ${{ matrix.target }}
+    #
+    # Both macOS targets run on the Apple Silicon fleet (`macos-14`).
+    # The arm64 runner natively builds `aarch64-apple-darwin` and
+    # cross-compiles `x86_64-apple-darwin` via the pre-installed
+    # universal Xcode toolchain — zero extra setup required.
+    #
+    # We previously pinned the Intel target to `macos-13`, but the
+    # Intel-x86_64 public runner fleet is being sunset and can block
+    # queued jobs for 10–30 minutes at a time.  The Apple Silicon
+    # fleet is ~3-4× bigger and charges the same minute multiplier, so
+    # we consolidate both macOS jobs there.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --manifest-path crates/python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  windows:
+    name: Build wheel — Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist --manifest-path crates/python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist
+
+  sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path crates/python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [linux, macos, windows, sdist]
+    # Trusted publisher uses OIDC, but we keep token-based here for
+    # simplicity — flip to `id-token: write` + `pypa/gh-action-pypi-publish`
+    # with no secrets once the project is claimed on PyPI.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Flatten artifact directories
+        run: |
+          mkdir -p upload
+          find dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} upload/ \;
+          ls -lah upload
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: upload
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Skip-existing means re-running the workflow on the same tag
+          # won't error if a wheel was already uploaded.
+          skip-existing: true

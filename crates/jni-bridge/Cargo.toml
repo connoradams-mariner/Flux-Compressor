@@ -1,6 +1,7 @@
 [package]
 name        = "flux-jni-bridge"
 description = "JNI bridge exposing FluxCompress to the Spark/JVM ecosystem"
+readme      = "README.md"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -13,7 +14,11 @@ name       = "flux_jni"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-loom         = { path = "../loom" }
+# Pull `flux-loom` from the workspace; alias it as `loom` locally so
+# `use loom::…` inside this crate stays unchanged. Version pin lives
+# in the workspace's `[workspace.dependencies] flux-loom = ...` so
+# bumping a release only touches the workspace `Cargo.toml`.
+loom         = { workspace = true }
 jni          = { version = "0.21", features = ["invocation"] }
 arrow        = { workspace = true }
 arrow-array  = { workspace = true }
@@ -21,6 +26,8 @@ arrow-schema = { workspace = true }
 byteorder    = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
+serde_json   = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true
+tempfile = "3"

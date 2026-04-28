@@ -8,17 +8,14 @@
 //! number of bytes consumed from the input slice.
 
 use crate::{
-    error::{FluxError, FluxResult},
     SecondaryCodec,
     compressors::{
-        bit_slab_compressor,
-        rle_compressor,
-        delta_compressor,
-        dict_compressor,
-        lz4_compressor,
-        string_compressor,
+        alp_compressor, bit_slab_compressor, delta_compressor, dict_compressor, lz4_compressor,
+        rle_compressor, string_compressor,
     },
+    error::{FluxError, FluxResult},
 };
+use std::io::Read;
 
 /// Decompress a single block starting at `data[0]`.
 ///
@@ -66,6 +63,24 @@ pub fn decompress_block(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
             rebuilt.extend_from_slice(&inner_data);
             return decompress_inner(&rebuilt);
         }
+        // SecondaryCodec::Brotli (=3) is not emitted for numeric blocks —
+        // the Brotli profile falls back to Zstd for numeric data and stores
+        // it with the Zstd tag.  This arm exists for forward-compatibility.
+        SecondaryCodec::Brotli => {
+            if data.len() < 6 {
+                return Err(FluxError::InvalidFile("Brotli block too short".into()));
+            }
+            let comp_len = u32::from_le_bytes(data[2..6].try_into().unwrap()) as usize;
+            let payload = &data[6..6 + comp_len];
+            let mut decompressed = Vec::new();
+            brotli::Decompressor::new(payload, 4096)
+                .read_to_end(&mut decompressed)
+                .map_err(|e| FluxError::Internal(format!("brotli decompress: {e}")))?;
+            inner_data = decompressed;
+            let mut rebuilt = vec![tag, 0u8];
+            rebuilt.extend_from_slice(&inner_data);
+            return decompress_inner(&rebuilt);
+        }
     };
 
     decompress_inner(dispatch_data)
@@ -75,14 +90,15 @@ pub fn decompress_block(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
 fn decompress_inner(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     let tag = data[0];
     match tag {
-        rle_compressor::TAG        => rle_compressor::decompress(data),
-        delta_compressor::TAG      => delta_compressor::decompress(data),
-        dict_compressor::TAG       => dict_compressor::decompress(data),
-        bit_slab_compressor::TAG   => bit_slab_compressor::decompress(data),
-        lz4_compressor::TAG        => lz4_compressor::decompress(data),
+        rle_compressor::TAG => rle_compressor::decompress(data),
+        delta_compressor::TAG => delta_compressor::decompress(data),
+        dict_compressor::TAG => dict_compressor::decompress(data),
+        bit_slab_compressor::TAG => bit_slab_compressor::decompress(data),
+        lz4_compressor::TAG => lz4_compressor::decompress(data),
+        alp_compressor::TAG => alp_compressor::decompress(data),
         // String blocks are handled separately (they return Vec<Vec<u8>>,
         // not Vec<u128>). This tag should not reach decompress_inner.
-        string_compressor::TAG     => Err(FluxError::InvalidFile(
+        string_compressor::TAG => Err(FluxError::InvalidFile(
             "string block (TAG 0x06) must be decompressed via string_compressor::decompress".into(),
         )),
         unknown => Err(FluxError::InvalidFile(format!(

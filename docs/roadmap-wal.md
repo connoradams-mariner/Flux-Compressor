@@ -2,6 +2,20 @@
 
 ![WAL Migration Roadmap](wal-migration-roadmap.png)
 
+Status: Phases 1 & 2 implemented in `crates/loom/src/txn/wal.rs`.
+
+- [x] **Phase 1 — binary append-only log** at `_flux_log/_wal.bin`
+      with `[u32 len][payload][u32 CRC32]` framing.  Opt-in via
+      `log_format = "wal_v1"` in `_flux_meta.json`.  Torn /
+      CRC-corrupt tails stop replay cleanly so crashed writes never
+      surface as phantom entries.
+- [x] **Phase 2 — checkpoints** at `_flux_log/_checkpoint-NNNNNNNN.json`.
+      `WalLog::latest_checkpoint_version` picks the newest and
+      `read_checkpoint` hands back its JSON payload; readers then
+      replay only the WAL tail past that version.
+- [ ] **Phase 3 — concurrent writers** with OCC / `put_if_absent`.
+      Deferred.
+
 ## Current State (v2)
 The transaction log uses JSON files in `_flux_log/NNNNNNNN.json`. This is
 human-readable and easy to debug, but has drawbacks at scale:

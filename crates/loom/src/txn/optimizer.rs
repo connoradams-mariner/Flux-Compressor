@@ -10,10 +10,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::error::{FluxError, FluxResult};
+use super::log_entry::{LogEntry, Operation};
 use super::partition::{ColumnStats, FileManifest, TableMeta};
 use super::table::FluxTable;
-use super::log_entry::{LogEntry, Operation};
+use crate::error::{FluxError, FluxResult};
 
 /// Options for the OPTIMIZE command.
 #[derive(Debug, Clone)]
@@ -145,12 +145,19 @@ mod tests {
             path: path.into(),
             partition_values: HashMap::new(),
             spec_id: 0,
+            schema_id: None,
             row_count: 1000,
             file_size_bytes: 10000,
             column_stats: [(
                 col.into(),
-                ColumnStats { min: Some(min.into()), max: Some(max.into()), null_count: 0 },
-            )].into(),
+                ColumnStats {
+                    min: Some(min.into()),
+                    max: Some(max.into()),
+                    null_count: 0,
+                },
+            )]
+            .into(),
+            column_stats_by_field_id: Default::default(),
         }
     }
 

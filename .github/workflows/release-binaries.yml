@@ -1,0 +1,367 @@
+# Build prebuilt fluxcapacitor binaries and ship them via Homebrew.
+#
+# This workflow is owned by `cargo-dist`. To regenerate it after
+# tweaking `[workspace.metadata.dist]` in the root `Cargo.toml`:
+#
+#     cargo install cargo-dist --version 0.27.0
+#     cargo dist init --yes
+#
+# `cargo dist init` will rewrite this file in place; do not hand-edit
+# the matrix below unless you also update the metadata block.
+#
+# ## What this workflow does
+#
+# 1. `plan` — runs `cargo dist plan` to enumerate which targets / artifacts
+#    the current tag should produce. Runs on every PR (so contributors
+#    catch config errors) and every tagged push (where it gates the
+#    real build matrix).
+# 2. `build-local-artifacts` — fan-out matrix that builds the
+#    fluxcapacitor binary on every target in `[workspace.metadata.dist]
+#    targets`, archives it, and uploads as a job artifact.
+# 3. `build-global-artifacts` — generates the curl|sh installer script
+#    and the Homebrew formula text from the per-target manifests.
+# 4. `host` — on tagged runs only, downloads every artifact and attaches
+#    them to the GitHub Release that release-please created.
+# 5. `publish-homebrew-formula` — pushes the generated `.rb` file into
+#    the `connoradams-mariner/homebrew-tap` repo so
+#    `brew install connoradams-mariner/tap/fluxcapacitor` picks it up.
+# 6. `announce` — final fan-in job; the GitHub Release is finalised
+#    when this completes.
+#
+# ## Required setup (one-time)
+#
+# See `docs/homebrew.md` for the full walkthrough. TL;DR:
+#
+#   1. Create `connoradams-mariner/homebrew-tap` on GitHub.
+#   2. Generate a fine-grained PAT with contents:write on that repo.
+#   3. Add it as the `HOMEBREW_TAP_TOKEN` secret on this repo.
+#
+# Tag scheme matches the rest of the release pipeline (`v*.*.*`), so
+# release-please's release PR merge fires this alongside
+# release-crates / release-pypi / release-maven.
+
+name: release-binaries
+
+permissions:
+  # Needed to attach artifacts to the GitHub Release.
+  contents: write
+  # Needed for the Homebrew formula push to use a workflow-scoped GH App
+  # token if you ever swap the PAT for one. Harmless when using a PAT.
+  id-token: write
+  attestations: write
+
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  # cargo-dist embeds the manifest in JSON output; keep it on disk so
+  # downstream jobs don't need to re-plan.
+  PLAN: dist-manifest.json
+  CARGO_DIST_VERSION: 0.27.0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. PLAN
+  #    Enumerate artifacts. Cheap; runs on every PR for fast feedback.
+  # ---------------------------------------------------------------------
+  plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    outputs:
+      manifest: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && github.ref_name || '' }}
+      tag-flag: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) && format('--tag={0}', github.ref_name) || '--no-local-paths' }}
+      publishing: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-installer.sh" \
+            | sh
+
+      - id: plan
+        name: Plan
+        run: |
+          # On tag pushes we use `host --steps=create` so cargo-dist
+          # creates the GitHub Release scaffold; on PRs we just plan.
+          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            cargo dist host --steps=create --tag="${{ github.ref_name }}" \
+              --output-format=json > "$PLAN"
+          else
+            cargo dist plan --output-format=json > "$PLAN"
+          fi
+          echo "manifest=$(jq -c . < "$PLAN")" >> "$GITHUB_OUTPUT"
+          cat "$PLAN"
+
+      - name: Upload plan manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-plan
+          path: ${{ env.PLAN }}
+
+  # ---------------------------------------------------------------------
+  # 2. BUILD LOCAL ARTIFACTS
+  #    One job per target triple. Each builds fluxcapacitor in release,
+  #    archives it (.tar.xz on unix), and uploads it.
+  # ---------------------------------------------------------------------
+  build-local-artifacts:
+    name: Build ${{ matrix.target }}
+    needs: plan
+    # Only build real binaries on tag pushes.  On PRs the `plan` job
+    # has already validated the cargo-dist config end-to-end, and
+    # running the full mac+linux build matrix on every commit burns
+    # ~20 minutes of CI for zero added signal.
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both macOS targets run on the Apple Silicon fleet (`macos-14`).
+          # The arm64 runner builds `aarch64-apple-darwin` natively and
+          # cross-compiles `x86_64-apple-darwin` via the pre-installed
+          # universal Xcode toolchain — zero extra setup required.
+          # The Intel-x86_64 public runner fleet (`macos-13`) is being
+          # sunset and can block queued jobs for 10–30 minutes at a
+          # time; the Apple Silicon fleet is ~3-4× bigger at the same
+          # minute multiplier.  This mirrors the matrix already used in
+          # `release-pypi.yml`.
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      BUILD_MANIFEST_NAME: target/distrib/${{ matrix.target }}-dist-manifest.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist-${{ matrix.target }}
+
+      # cargo-dist uses cargo-zigbuild (Zig as a portable cross-linker)
+      # for aarch64-linux cross-compilation from x86_64 ubuntu.  Without
+      # it, `dist build --target=aarch64-unknown-linux-gnu` errors with
+      # "The following tools are required to run this task, but are
+      # missing: cargo-zigbuild".  This mirrors the `packages_install`
+      # step that `cargo dist plan` would auto-emit.
+      - name: Install cargo-zigbuild (aarch64-linux cross-compile)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          if ! command -v cargo-zigbuild > /dev/null 2>&1; then
+            pip3 install cargo-zigbuild
+          fi
+
+      - name: Install cargo-dist
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-installer.sh" \
+            | sh
+
+      - name: Build artifacts
+        run: |
+          cargo dist build ${{ needs.plan.outputs.tag-flag }} \
+            --print=linkage \
+            --output-format=json \
+            --artifacts=local \
+            --target=${{ matrix.target }} \
+            > dist-manifest.json
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: |
+            target/distrib/*.tar.xz
+            target/distrib/*.tar.gz
+            target/distrib/*.zip
+            target/distrib/*.json
+            target/distrib/*-dist-manifest.json
+
+  # ---------------------------------------------------------------------
+  # 3. BUILD GLOBAL ARTIFACTS
+  #    Once every target is built, generate the curl|sh installer and the
+  #    Homebrew formula text. These are derived from the per-target
+  #    manifests, so they fan-in.
+  # ---------------------------------------------------------------------
+  build-global-artifacts:
+    name: Build global artifacts
+    needs: [plan, build-local-artifacts]
+    # Same gating as `build-local-artifacts` — belt-and-suspenders so the
+    # job is explicitly skipped on PRs even if a future GitHub Actions
+    # change alters the default skipped-needs cascade.
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-installer.sh" \
+            | sh
+
+      - name: Download all local artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-build-local-*
+          path: target/distrib/
+          merge-multiple: true
+
+      - name: Build global artifacts
+        run: |
+          cargo dist build ${{ needs.plan.outputs.tag-flag }} \
+            --output-format=json \
+            --artifacts=global \
+            > dist-manifest.json
+
+      - name: Upload global artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-global
+          path: |
+            target/distrib/*.sh
+            target/distrib/*.ps1
+            target/distrib/*.rb
+            target/distrib/*.json
+
+  # ---------------------------------------------------------------------
+  # 4. HOST
+  #    On tagged runs, attach every artifact to the GitHub Release.
+  # ---------------------------------------------------------------------
+  host:
+    name: Host on GitHub Release
+    needs: [plan, build-local-artifacts, build-global-artifacts]
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${CARGO_DIST_VERSION}/cargo-dist-installer.sh" \
+            | sh
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+
+      - name: Upload artifacts to GitHub Release
+        run: |
+          cargo dist host \
+            --tag="${{ needs.plan.outputs.tag }}" \
+            --steps=upload \
+            --steps=release \
+            --output-format=json \
+            > dist-manifest.json
+          cat dist-manifest.json
+
+      - name: Upload combined manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+
+  # ---------------------------------------------------------------------
+  # 5. PUBLISH HOMEBREW FORMULA
+  #    Pushes the generated .rb to connoradams-mariner/homebrew-tap.
+  # ---------------------------------------------------------------------
+  publish-homebrew-formula:
+    name: Publish Homebrew formula
+    needs: [plan, host]
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      # PAT scoped to `contents:write` on the homebrew-tap repo.
+      # See docs/homebrew.md for how to mint this.
+      GITHUB_USER: cargo-dist[bot]
+      GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      PLAN_PATH: dist-manifest.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: connoradams-mariner/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Leave room to checkout into a sub-path so we can also clone
+          # the source tree if cargo-dist needs anything from it.
+          path: homebrew-tap
+
+      - name: Download formula artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-build-global
+          path: distrib/
+          merge-multiple: true
+
+      - name: Download dist manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+          path: distrib/
+
+      - name: Commit formula
+        working-directory: homebrew-tap
+        run: |
+          mkdir -p Formula
+          cp ../distrib/*.rb Formula/
+          git config user.name  "cargo-dist[bot]"
+          git config user.email "cargo-dist[bot]@users.noreply.github.com"
+          git add Formula/
+          if git diff --cached --quiet; then
+            echo "No formula changes to commit."
+            exit 0
+          fi
+          git commit -m "fluxcapacitor ${{ needs.plan.outputs.tag }}
+
+          Auto-generated by cargo-dist from
+          connoradams-mariner/Flux-Compressor@${{ github.sha }}.
+
+          Co-Authored-By: Oz <oz-agent@warp.dev>"
+          git push origin HEAD:main
+
+  # ---------------------------------------------------------------------
+  # 6. ANNOUNCE
+  #    Final fan-in. Marks the GitHub Release as published.
+  # ---------------------------------------------------------------------
+  announce:
+    name: Announce release
+    needs: [plan, host, publish-homebrew-formula]
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarise
+        run: |
+          echo "Release: ${{ needs.plan.outputs.tag }}"
+          echo "Host:    ${{ needs.host.result }}"
+          echo "Brew:    ${{ needs.publish-homebrew-formula.result }}"

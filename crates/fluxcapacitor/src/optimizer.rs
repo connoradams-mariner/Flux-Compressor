@@ -19,30 +19,26 @@
 //!   per-block estimates).
 //! - **Z-Order interleaving** of block metadata for multi-dimensional locality.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
-use walkdir::WalkDir;
 use rayon::prelude::*;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 use loom::{
     atlas::{AtlasFooter, BlockMeta, z_order_encode},
     bit_io::discover_width,
     compressors::flux_writer::compress_chunk,
     decompressors::block_reader::decompress_block,
-    loom_classifier::{classify, LoomStrategy},
+    loom_classifier::{LoomStrategy, classify},
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn cmd_optimize(
-    input_dir: &Path,
-    output: &Path,
-    _block_kb: usize,
-) -> Result<()> {
+pub fn cmd_optimize(input_dir: &Path, output: &Path, _block_kb: usize) -> Result<()> {
     println!("╔══════════════════════════════════════╗");
     println!("║  FluxCapacitor Cold Optimizer        ║");
     println!("╚══════════════════════════════════════╝");
@@ -91,12 +87,7 @@ fn pass1_scan(input_dir: &Path) -> Result<ScanResult> {
     let partition_paths: Vec<PathBuf> = WalkDir::new(input_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "flux")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "flux").unwrap_or(false))
         .map(|e| e.path().to_path_buf())
         .collect();
 
@@ -126,8 +117,12 @@ fn pass1_scan(input_dir: &Path) -> Result<ScanResult> {
 
             for &v in &values {
                 unique_values.insert(v);
-                if v < global_min { global_min = v; }
-                if v > global_max { global_max = v; }
+                if v < global_min {
+                    global_min = v;
+                }
+                if v > global_max {
+                    global_max = v;
+                }
             }
             all_blocks.push(values);
         }
@@ -179,8 +174,7 @@ fn pass2_repack(scan: &ScanResult) -> Result<Vec<u8>> {
     let mut footer = AtlasFooter::new();
 
     // Sort blocks by Z-Order of their [min, max] midpoint for spatial locality.
-    let mut indexed_blocks: Vec<(usize, &Vec<u128>)> =
-        scan.all_blocks.iter().enumerate().collect();
+    let mut indexed_blocks: Vec<(usize, &Vec<u128>)> = scan.all_blocks.iter().enumerate().collect();
 
     indexed_blocks.sort_by_key(|(_, block)| {
         let min = block.iter().copied().min().unwrap_or(0);
@@ -252,17 +246,15 @@ impl ColdOptimizer {
 
     /// Number of unique values in the global dictionary (available after pass 1).
     pub fn global_dict_size(&self) -> usize {
-        self.scan
-            .as_ref()
-            .map(|s| s.global_dict.len())
-            .unwrap_or(0)
+        self.scan.as_ref().map(|s| s.global_dict.len()).unwrap_or(0)
     }
 
     /// **Pass 2** — re-pack with global dictionary + Z-Order, write archive.
     pub fn optimize(&self, output: &std::path::Path) -> Result<()> {
-        let scan = self.scan.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("call scan_partitions() before optimize()")
-        })?;
+        let scan = self
+            .scan
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("call scan_partitions() before optimize()"))?;
         let bytes = pass2_repack(scan)?;
         std::fs::write(output, &bytes)?;
         Ok(())

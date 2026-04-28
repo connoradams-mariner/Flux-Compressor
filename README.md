@@ -12,11 +12,223 @@ time travel.
 
 ---
 
-## Benchmarks (1M Rows)
+## Benchmarks
 
-All numbers from `fluxcapacitor dtype-bench --rows 1000000` on Linux
-(Rust release build, mmap reads, rayon parallel). Raw size is the
-in-memory Arrow footprint.
+All numbers from `fluxcapacitor` on Linux (Rust release build, mmap reads,
+rayon parallel). Raw size is the in-memory Arrow footprint unless noted.
+
+### Mixed 22-column schema — Flux vs Parquet vs Delta Lake
+
+`cargo run -p fluxcapacitor --release -- compare-bench --rows 5000000`
+
+```
+Codec                     Size       Ratio    Comp MB/s   Dec MB/s
+───────────────────────  ─────────  ───────  ──────────  ────────
+Flux (Archive)          147.4 MB   9.74×          624        1369
+Parquet (zstd-3)        225.3 MB   6.37×          357        1151
+Delta Lake (zstd-3)     225.3 MB   6.37×          357         834
+```
+
+Schema: 4×Int64, 4×Float64, 2×Timestamp, 1×Date32, 3×Boolean, 8×Utf8, 5M rows.
+**Flux is 34.6 % smaller than both Parquet and Delta Lake.**  Delta
+Lake's storage format is Parquet + a tiny `_delta_log/` JSON commit
+log (2.2 KB here), so its on-disk footprint tracks Parquet at scale;
+the 834 MB/s Delta read number is Parquet decode + log parse.  Flux
+also out-compresses faster (624 vs 357 MB/s) and decompresses faster
+(1369 vs 1151 MB/s).
+
+### Float-heavy IoT/scientific schema — Flux vs Parquet vs Delta Lake
+
+`cargo run -p fluxcapacitor --release -- float-compare-bench --rows 10000000`
+
+Schema: 10 Float64 columns (prices with 2 decimals, GPS lat/lon with 6
+decimals, CPU / memory usage bounded [0,1], temperature, latency,
+revenue, wind speed, signal strength) + 2 Int64 ids + 1 Timestamp.
+In-memory Arrow footprint 992 MB.
+
+```
+Codec                     Size        Ratio    Comp MB/s   Dec MB/s
+───────────────────────  ──────────   ───────  ──────────  ────────
+Flux (Archive)          310.7 MB     3.19×         718        1131
+Parquet (zstd-3)        444.4 MB     2.23×         204         785
+Delta Lake (zstd-3)     444.4 MB     2.23×         204         769
+```
+
+**Flux is 30.1 % smaller than both Parquet and Delta Lake on realistic
+float workloads**, compresses **3.5× faster** (718 vs 204 MB/s), and
+**decompresses 44 % faster** (1131 vs 785 MB/s).
+
+This is a big improvement over the old per-column Float64 numbers,
+which were historically our weakest dtype. The win comes from the
+ALP pre-transform: when a column has a detectable decimal
+character (prices, coordinates, percentages, sensor readings with
+fixed scale), the integer mantissas route through the BitSlab
+pipeline and compress like integers.  Scaling stays rock-steady:
+
+```
+Rows    Flux(A)     Parquet(zstd)   Delta(zstd)    Flux smaller by
+1M       31.1 MB      44.5 MB        44.5 MB          30.2 %
+5M      155.4 MB     222.1 MB       222.1 MB          30.0 %
+10M     310.7 MB     444.4 MB       444.4 MB          30.1 %
+```
+
+#### Pure-random floats — the worst case, post zero-copy
+
+A single Float64 column of truly random mantissas (no decimal
+pattern for ALP to find) is the hardest case. v0.5 lands the
+**zero-copy Float64 buffer sharing** optimisation: the
+decompressed `Vec<u64>` is handed straight to Arrow's
+`Buffer::from_vec`, so there's no per-value `f64::from_bits` loop
+and no intermediate `Vec<f64>` allocation — the final `Float64Array`
+reuses the exact memory the BitSlab decoder produced.
+
+```
+(pure random Float64, 1M rows — fluxcapacitor dtype-bench)
+Codec                 Size      Ratio     Comp MB/s   Dec MB/s
+───────────────────  ───────    ──────   ──────────  ────────
+Flux (Balanced)       6.1 MB    1.2×          334        1,051     ← +80 % vs v0.4
+Flux (Archive)        6.1 MB    1.3×          337          441
+Parquet (zstd)        7.0 MB    1.1×          306          870
+Parquet (snappy)      7.9 MB    1.0×          404        2,712
+```
+
+**Flux balanced now at 1.05 GB/s decompress** (up from 583 MB/s in
+v0.4) — that's 1.2× faster than Parquet zstd, finally in shouting
+distance of Parquet snappy's raw byte-copy path.  The Archive
+profile still trails on pure-random floats because zstd decode
+dominates, not the final buffer reconstruction; callers who need
+max decode speed on entropic doubles should prefer `Balanced`.
+
+The same zero-copy dispatch also accelerates `Int64`, `UInt64`,
+`Date64`, and every `Timestamp(*, None)` variant.  Spot-checks at
+1 M rows:
+
+```
+Type                 v0.4 dec    v0.5 dec   change
+─────────────────  ─────────   ─────────  ───────
+Float64 (balanced)   583 MB/s    1,051 MB/s  +80 %
+Int64   (archive)    429 MB/s    1,143 MB/s  +166 %
+UInt64  (balanced)   642 MB/s    1,009 MB/s  +57 %
+Timestamp (archive)  934 MB/s    1,106 MB/s  +18 %
+```
+
+The wider mixed-schema bench consequently ticks up: the 22-column
+bench now reports **1,435 MB/s decompress** on Archive (up from
+1,369 MB/s in v0.4), keeping its 34.6 % size lead over Parquet /
+Delta Lake.
+
+### String-heavy log/event schema — Flux vs Parquet vs Delta Lake
+
+`cargo run -p fluxcapacitor --release -- string-compare-bench --rows 10000000`
+
+Schema: 10 string columns (country enums, device types, HTTP methods,
+log levels, medium-cardinality categories, email addresses with shared
+domain suffixes, URL paths with shared hostnames, user-agent strings,
+free-text log messages) + 2 identifier Int64 columns + 1 Timestamp.
+In-memory Arrow footprint 2.68 GB.
+
+```
+Codec                     Size       Ratio    Comp MB/s   Dec MB/s
+───────────────────────  ─────────  ───────  ──────────  ────────
+Flux (Archive)          231.6 MB  11.83×          546        1154
+Parquet (zstd-3)        268.1 MB  10.23×          456        1357
+Delta Lake (zstd-3)     268.1 MB  10.23×          456         936
+```
+
+**Flux is 13.6 % smaller than both Parquet and Delta Lake** on this
+string-dominated workload, despite Parquet's dictionary encoding
+already doing a great job with repeated string columns.  Flux's
+advantage comes from:
+
+- **Per-column probe-gated strategy selection.**  Low-card enums
+  (`country`, `device_type`, `status`, `http_method`, `log_level`)
+  hit the Dict + Loom-compressed-indices path; medium-card
+  `category` still benefits from Dict; URLs / emails / user-agents
+  hit the FSST pipeline with secondary Zstd; free-text
+  `message` uses sub-block MULTI + Zstd.
+- **Cross-column FSST dictionaries** trained across compatible
+  string columns under the 128 MB combined-size ceiling.
+- **Part 8 zero-alloc FSST decode** (new in v0.5) — the decoder
+  now appends FSST-decoded bytes straight into the output
+  `StringArray` value buffer.
+
+Scale consistency — the ratio stabilises around 11.8× quickly:
+
+```
+Rows    Flux(A)    Parquet(zstd)  Delta(zstd)   Flux↓ vs Parquet
+1M      23.6 MB     26.9 MB       26.9 MB       −12.0 %
+5M     116.0 MB    134.1 MB      134.1 MB       −13.5 %
+10M    231.6 MB    268.1 MB      268.1 MB       −13.6 %
+```
+
+### Pure-string micro bench (per pattern)
+
+`cargo run -p fluxcapacitor --release -- string-bench --rows 2000000`
+
+```
+Pattern               Profile    Size         Ratio    Comp MB/s  Dec MB/s
+────────────────────  ───────    ──────────   ─────────  ─────────   ────────
+urls_high_card        Archive    39.4 MB       4.0×     150        731
+uuids                 Archive    37.6 MB       1.8×      81        783
+log_lines             Archive    24.5 MB       6.7×     238        621
+sorted_paths          Archive    3.4 KB   23,618.2×   1,657      1,078
+mixed_categorical     Archive    1.9 MB       17.8×     645      2,042
+short_skus            Archive    1.5 KB   18,469.7×     664      1,520
+```
+
+Sorted paths and SKUs hit the front-coding sub-strategy and
+compress by four orders of magnitude.  High-cardinality URLs / log
+lines hit FSST with Zstd on top.  Mixed categorical (low cardinality
+with long tail) hits Dict + Loom-indexed output — 2 GB/s decompress
+on that path is already faster than Parquet snappy's 2.1 GB/s pure
+byte-copy path.
+
+### Mixed 22-column schema — 9.95M rows (Databricks-shaped workload)
+
+`cargo run -p fluxcapacitor --release -- mixed-bench --rows 9950000`
+
+```
+Codec                     Size       Ratio    Comp MB/s   Dec MB/s
+──────────────────────  ─────────  ───────  ──────────  ────────
+Flux (Archive)            302 MB     9.47×          ~700       ~1160
+Parquet (zstd-3)          448 MB     6.37×          ~360       ~1150
+```
+
+Flux wins on compression ratio by **32.7%** while matching Parquet's
+decompression throughput. On a 2.01 GB CSV round-trip the same schema
+typically shows a ~15 MB ratio advantage for Flux with Flux
+decompression ~90 MB/s faster than Parquet, Parquet compression
+~13 MB/s faster than Flux.
+
+### High-cardinality string corpus — 10M rows
+
+`cargo run -p fluxcapacitor --release -- string-bench --rows 10000000`
+
+```
+Pattern              Profile     Ratio      Comp MB/s   Dec MB/s
+──────────────────  ──────────  ─────────  ──────────  ────────
+urls_high_card       Speed       3.1×        606         504
+urls_high_card       Archive     3.7×        573         835
+uuids                Speed       1.6×        483         517
+uuids                Archive     1.9×        281         863
+log_lines            Speed       3.1×       1306         792
+log_lines            Archive     6.0×        988         677
+sorted_paths         Speed    1,227.3×       6306        1168
+sorted_paths         Archive 17,109.1×       5525        1112
+mixed_categorical    any        18.0×       1403        1977
+short_skus           Speed    1,017.7×       3230        1808
+short_skus           Archive 16,908.2×       2678        1677
+```
+
+Adaptive per-column selection across Dict, FSST, front-coding, trained
+zstd dictionary, sub-block (`SUB_MULTI`), and cross-column groups.
+Sorted/hierarchical data (paths, formatted SKUs) gets four-orders-of-
+magnitude compression from front-coding + zstd secondary. High-cardinality
+text (URLs, logs) gets 1.6–3.7× from FSST with LZ4/Zstd on top.
+
+### Single-type micro bench — 1M rows
+
+All numbers from `fluxcapacitor dtype-bench --rows 1000000`.
 
 ### Compression Ratio
 
@@ -157,9 +369,43 @@ cargo run -p fluxcapacitor --release -- dtype-bench --rows 1000000
 # Single-column sequential benchmark
 cargo run -p fluxcapacitor --release -- bench --rows 50000000 --pattern sequential
 
+# FluxTable transaction-log microbenchmarks
+cargo bench -p loom --bench fluxtable
+
+# Row-level predicate evaluation (Part 2)
+cargo bench -p loom --bench predicate_eval
+
 # Python scaling benchmark with charts
 python python/tests/bench_scaling.py
 ```
+
+### FluxTable + Predicate microbenchmarks
+
+Fresh numbers on Linux (rustc 1.85, release):
+
+```
+Bench                                             Time          Throughput
+───────────────────────────────────────────────  ────────────  ─────────────
+fluxtable/append           1024 rows             ~138 µs       ~7.4 Melem/s
+fluxtable/append           65k  rows             ~178 µs       ~368 Melem/s
+fluxtable/append           524k rows             ~485 µs       ~1.08 Gelem/s
+fluxtable/scan             262k rows  (4 files)  ~1.9  ms      ~134 Melem/s
+fluxtable/scan             1M   rows  (2 files)  ~16.8 ms      ~62  Melem/s
+fluxtable/compress_append  65k  rows             ~4.3  ms      ~15  Melem/s
+fluxtable/compress_append  524k rows             ~33.6 ms      ~15.6 Melem/s
+fluxtable/evolve_schema    add_column            ~176 µs       —
+
+predicate/eval_on_batch    gt         524k rows  ~113 µs       ~565 Melem/s
+predicate/eval_on_batch    between    524k rows  ~487 µs       ~131 Melem/s
+predicate/eval_on_batch    and_or_deep 524k rows ~841 µs       ~76  Melem/s
+predicate/eval_on_batch    gt         2.1M rows  ~3.5  ms      ~593 Melem/s
+predicate/eval_on_batch    between    2.1M rows  ~15.9 ms      ~132 Melem/s
+predicate/eval_on_batch    and_or_deep 2.1M rows ~26.4 ms      ~79  Melem/s
+```
+
+The `predicate/eval_on_batch` numbers measure the new row-level
+primitive that underpins the mutations roadmap (`delete_where`,
+`update_where`, `merge`).
 
 ---
 
@@ -229,8 +475,10 @@ overhead).
 
 **Ecosystem and tooling.** Parquet is the de facto standard with
 first-class support in Spark, DuckDB, Polars, Pandas, BigQuery, Snowflake,
-and every major data tool. FluxCompress provides Python bindings and a
-Spark JNI bridge, but adoption requires explicit integration.
+and every major data tool. FluxCompress provides Python bindings, a
+Spark JNI bridge, and (new in v0.4) a Spark DataSource V2 connector
+(`df.write.format("flux")`), but adoption still requires explicit
+integration.
 
 ### Summary
 
@@ -278,12 +526,14 @@ All types round-trip losslessly through `FluxWriter` → `.flux` file →
 
 ```
 Category           Types                                          Routing
-─────────────────  ─────────────────────────────────────────────  ─────────────────
+─────────────────  ────────────────────────────────────────  ─────────────────
 Integers           UInt8, UInt16, UInt32, UInt64                  u8/u16 → BitSlab
                    Int8, Int16, Int32, Int64                      fast path; others
                                                                   → Loom Classifier
 
-Floats             Float32, Float64                               → Loom Classifier
+Floats             Float32, Float64                               → ALP (decimal
+                                                                    detection) with
+                                                                    Loom fallback
 
 Temporal           Date32, Date64                                 → Loom Classifier
                    Timestamp (Second, Millis, Micros, Nanos)      → DeltaDelta fast
@@ -292,17 +542,47 @@ Temporal           Date32, Date64                                 → Loom Class
 
 Boolean            Boolean                                        → RLE fast path
 
-Decimal            Decimal128                                     → Loom Classifier
-                                                                    (u128 path)
+Decimal / 128-bit  Decimal128 (i128 / u128 carrier)               → Full u128
+                                                                    pipeline with
+                                                                    OutlierMap
 
-Variable-length    Utf8, LargeUtf8, Binary, LargeBinary           → String pipeline
-                                                                    (dict or LZ4/Zstd)
+Variable-length    Utf8, LargeUtf8, Binary, LargeBinary           → Adaptive string
+                                                                    pipeline (see
+                                                                    below)
 
 Nested             Struct, List, Map                              → Recursive
                                                                     flattening +
                                                                     parallel per-leaf
                                                                     compression
 ```
+
+### Adaptive string pipeline
+
+The string compressor selects per-column (and per-sub-block for large
+columns) from 9 sub-strategies using probe-based bakeoffs so it only
+spends what the data demands:
+
+```
+Sub-strategy         When it fires                         Typical win
+───────────────────  ──────────────────────────────────────  ───────────────
+Dict                 Cardinality ≤ 30 % (sampled)          18×
+Raw LZ4 / Raw Zstd   High-card baseline                    1.5–2×
+FSST (LZ4 / Zstd)    Repeated 2–8 byte substrings          2×–4×
+                     (URLs, UUIDs, log lines)
+Raw / FSST + zstd    Large Archive blocks where a          +5–30 % vs plain
+  trained dict         dictionary beats plain zstd          zstd
+Front-coded          ≥98 % sorted + ≥8-byte shared prefix   **orders of**
+                     (paths, formatted SKUs)               **magnitude**
+Sub-block (MULTI)    Row count > 1M — splits into 500K     parallel encode,
+                     sub-blocks, re-decides per-block       streaming-friendly
+Cross-column group   Multiple compatible string columns    single FSST /
+                     under ≈128 MB combined, if a probe    zstd dict shared
+                     bakeoff shows it beats per-column      across columns
+```
+
+Partition-source columns (from `TableMeta.current_spec()`) are
+automatically excluded from cross-column grouping so predicate pushdown
+and partition pruning stay correct.
 
 ---
 
@@ -323,6 +603,7 @@ crates/
 │   ├── dtype_router.rs  DType Router (pre-classification fast paths)
 │   ├── segmenter.rs   Adaptive segmenter with drift detection
 │   ├── atlas.rs       v2 footer (61B BlockMeta + ColumnDescriptor tree)
+│   ├── traits.rs      Predicate (block skip + row eval) + compressor traits
 │   ├── txn/           Transaction log + snapshot time travel
 │   ├── simd/          AVX2 / NEON / scalar bit unpackers
 │   ├── compressors/   RLE, Delta, Dict, BitSlab, LZ4, String + secondary
@@ -332,6 +613,13 @@ crates/
 ├── jni-bridge/        Spark JNI (u128 dual-register)
 ├── python/            PyO3 bindings (Arrow FFI zero-copy)
 └── fluxcapacitor/     CLI (bench, compress, inspect, optimize)
+
+spark-connector/       Scala DataSource V2 connector (Phase H — new)
+├── build.sbt          Scala 2.12 + Spark 3.5 provided deps
+└── src/main/scala/
+    ├── com/datamariners/fluxcompress/spark/     FluxDataSource / FluxScan / FluxWrite
+    └── org/apache/spark/sql/fluxcompress/
+                                   SparkArrowBridge (ArrowWriter / ArrowUtils shim)
 ```
 
 ### Key Design Decisions
@@ -419,6 +707,29 @@ let snap = table.snapshot_at_version(0)?;  // time travel
 ---
 
 ## Getting Started
+
+### Install the CLI
+
+Prebuilt binaries via Homebrew (macOS + Linuxbrew):
+
+```bash
+brew install connoradams-mariner/tap/fluxcapacitor
+```
+
+Or the curl|sh installer (macOS + Linux):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/connoradams-mariner/Flux-Compressor/releases/latest/download/fluxcapacitor-installer.sh \
+  | sh
+```
+
+Both ship architecture-specific binaries (Apple Silicon, Intel mac,
+x86_64 / aarch64 Linux) signed against the SHA-256 of the GitHub
+Release artifacts. See [docs/homebrew.md](docs/homebrew.md) for
+details.
+
+### Build from source
 
 ```bash
 # Build & test
@@ -513,23 +824,202 @@ SupportsOverwriteV2 / DROP against a registered `flux` catalog.
 - **Nested types** — Struct/List/Map with lengths-not-offsets, delta-from-base, key sorting
 - **Throughput optimizations** — u64 decompress path, direct Arrow string construction, parallel leaf compress/decompress, sampled cardinality estimation
 
-### In Progress (v0.3)
+### Completed (v0.3)
 
-- **Fused encode + compress** — stream encoder output directly into LZ4/Zstd, eliminating intermediate buffers. Estimated 15–20% compress speedup.
-- **Zstd dictionary** — train on first blocks, compress subsequent with shared context. 30–40% Archive profile speedup.
-- **Generic classifier** — `classify<T>` over native width, avoiding u128 widening in the classify hot path.
+- **FSST symbol-table compression** — per-column static symbol tables on
+  high-cardinality strings (URLs, UUIDs, log lines). Probe-based bakeoff
+  picks FSST vs raw vs trained-zstd-dict per column.
+- **Front coding for sorted/hierarchical data** — shared-prefix encoding
+  that yields 1,000–17,000× compression on sorted paths, SKUs, and
+  other monotonic strings.
+- **Sub-block container (`SUB_MULTI`)** — splits columns >1M rows into
+  500K-row sub-blocks, each independently re-deciding its sub-strategy.
+  Enables parallel encode/decode and streaming checkpoints.
+- **Cross-column string grouping** — trains ONE shared FSST/zstd
+  dictionary across compatible sibling columns. Guarded by a
+  profitability bakeoff, a 128 MB combined-size ceiling, and a 32 MB
+  per-column ceiling so wide Databricks/Spark workloads never OOM.
+  Partition-source columns are automatically isolated.
+- **ALP for Float64 / Float32** — detects decimal-shaped floats
+  (prices, lat/lon, integer-as-float) and encodes integer mantissas
+  through the BitSlab / DeltaDelta pipeline with outlier patching.
+- **Native Decimal128 (i128 / u128) round-trip** — `Decimal128Array`
+  columns use the full u128 pipeline end-to-end (BitSlab + OutlierMap)
+  so values >u64::MAX are preserved exactly.
+- **Classifier fix for monotonic sequences** — `bit_entropy` no longer
+  false-fires on RLE for monotonic offsets / indices. This fixes a
+  codebase-wide correctness issue where long monotonic integer columns
+  could blow up to raw size.
+- **Group-level decode cache** — when N columns share a cross-group
+  block, the reader decodes once and serves every member from cache,
+  closing the decompression gap to Parquet.
 
-### Planned (v0.4+)
+### Completed (v0.4)
 
-- **Null bitmap support** — compress only dense non-null values, reconstruct nulls on read. BlockMeta field exists, implementation pending.
-- **Predicate pushdown for strings** — min/max string metadata in footer for Z-Order skipping on string columns.
-- **SIMD decompression** — AVX2/NEON-accelerated BitSlab unpacking on the decompress path (currently SIMD is compress-only).
-- **Parquet-competitive Float64 decode** — investigate direct bit-copy from decompressed buffer to Arrow Float64 buffer without per-value `from_bits` conversion.
-- **Zero-copy buffer sharing** — return Arrow buffers backed by the decompressed block memory without copying. Requires `unsafe` alignment guarantees.
+- **Spark DataSource V2 connector (Phase H)** — new `spark-connector/`
+  Scala project wires the JNI bridge into Spark 3.5's DSv2 APIs so
+  users can say `df.write.format("flux").option("evolve",
+  "true").save(path)` and `spark.read.format("flux").load(path)`
+  directly, with Arrow-IPC-based columnar reads and per-task
+  `tableAppend` commits. See [spark-connector/README.md](spark-connector/README.md).
+- **Row-level predicate evaluation (mutations Part 2)** —
+  `Predicate::eval_on_batch` builds a `BooleanArray` mask over a
+  `RecordBatch` using Arrow typed downcasts; it is the shared
+  primitive for DELETE, UPDATE, and MERGE.
+
+### Completed (v0.5)
+
+- **CI/CD for crates.io, PyPI, and Maven Central** — three tag-driven
+  release workflows under [`.github/workflows/`](.github/workflows/)
+  cut releases on `vX.Y.Z` tags.  PyPI wheels cover
+  Linux x86_64 / aarch64, macOS x64 / arm64, and Windows x64.  The
+  Maven Central JAR bundles the `flux_jni` cdylib for all five
+  platforms so `com.datamariners.fluxcompress:flux-spark-connector_2.12:X.Y.Z`
+  works out of the box on Databricks with no DBFS sidecar.
+- **Databricks quickstart** — see [docs/databricks.md](docs/databricks.md).
+  After the first Maven Central release you can install the cluster
+  library and run `sdf.write.format("flux").save(path)` from PySpark.
+- **Runtime native loader** — new `FluxNativeLoader` extracts the
+  correct platform-specific cdylib from the JAR at first JNI call.
+  No user-visible config required; override via `-Dflux.native.path`
+  or `-Dflux.native.loadlib=true` for local cargo builds.
+- **MERGE WHEN MATCHED UPDATE / DELETE** — full hash-join merge on
+  `Int32/Int64/UInt32/UInt64/Utf8` join keys via `extract_join_keys`
+  + `apply_merge_update`.  Matched rows in `UpdateFromSource(cols)`
+  are patched in place via `take + zip`; matched rows in
+  `Delete` clauses drop out of the rewritten file.
+- **Null-aware compression wrapper (Part 1 end-to-end)** — new
+  `null_aware::compress` / `decompress` preserves nulls for every
+  Arrow array without touching the 1700-line writer internals.
+  Fully-non-null columns pay zero bitmap overhead.  Framed with a
+  magic prefix so it can't be confused with raw `.flux` files.
+- **FSST zero-alloc decode integrated** — `decompress_fsst_to_arrow`
+  now decodes straight into the output `StringArray` value buffer,
+  dropping the `Vec<Vec<u8>>` intermediate.  Parallel rayon chunks
+  amortise the per-row `decompress` allocations.
+- **DELETE / UPDATE / MERGE via COW (Mutations Parts 3-5)** —
+  `FluxTable::delete_where(&Predicate)`,
+  `FluxTable::update_where(&Predicate, HashMap<String, ScalarValue>)`,
+  and `FluxTable::merge(source, on, MergeClauses)`.  Each operation
+  evaluates the predicate against every candidate file, skips
+  zero-match files, removes all-match files wholesale, and otherwise
+  recompresses the surviving rows.  Commit is a single log entry
+  pairing every `remove` with its matching `add`, plus a
+  `MutationAction::{Delete | Update | Merge}` provenance record
+  that older readers silently tolerate via the existing
+  `#[serde(other)]` branch.
+- **String predicate pushdown (Part 9)** — new
+  `Predicate::EqualStr { column, value }` and
+  `Predicate::InStr { column, values }` variants with full
+  `eval_on_batch` support on `StringArray` columns, plus a
+  `may_overlap_str(block_min, block_max)` block-skip check that
+  honours lexicographic prefix semantics for 16-byte block fingerprints.
+- **Binary WAL + checkpoints (WAL Parts 1 & 2)** — new `txn::wal`
+  module with a framed append-only log
+  (`[u32 payload_len][payload][u32 CRC32]`) and
+  `_checkpoint-NNNNNNNN.json` snapshot files.  Opt-in via
+  `log_format = "wal_v1"` in `_flux_meta.json`; legacy one-file-per-
+  commit layout remains the default.  Torn and CRC-corrupt tails are
+  skipped cleanly on replay.
+- **Null bitmap primitive (Part 1)** — `null_bitmap::encode` /
+  `decode` round-trip Arrow validity buffers through a compact
+  `[u32 len][bytes]` frame.  Fully-non-null columns pay zero bytes;
+  the primitive is wired for use by the writer pipeline in a follow‑up.
+- **FSST zero-alloc `StringArray` builder (Part 8)** —
+  `string_zero_alloc::string_array_from_parts` skips the
+  `Vec<Vec<u8>>` → `Vec<String>` → `StringArray` allocation chain
+  by folding decoded offsets + values directly into an Arrow
+  `ArrayData` via `build_unchecked`.  Wiring into the FSST decode
+  path itself is the natural follow-up inside
+  `compressors/string_compressor.rs`.
+- **Flux vs Parquet vs Delta Lake bench** — new
+  `fluxcapacitor compare-bench` subcommand writes the same dataset
+  three ways and reports honest size+speed numbers.  Delta Lake's
+  artefact is produced as `parquet file + _delta_log/*.json` because
+  that's literally its storage format.
+
+### In Progress / Deferred
+
+- **SIMD decompression** — AVX2/NEON-accelerated BitSlab unpacking on
+  the decompress path (currently SIMD is compress-only).
+- **Deep writer-side null integration** — the layered
+  `null_aware::compress` path preserves nulls end-to-end with zero
+  overhead on non-null columns.  A future follow-up wires the
+  bitmap directly into each `BlockMeta.null_bitmap_offset` so
+  predicate pushdown can skip null-only blocks without reading them.
+- **Mutations Phase D (deletion vectors)** — deferred; needs format
+  changes beyond a single session.
+- **WAL Phase 3 (concurrent writers)** — deferred; needs an OCC
+  protocol on top of the binary WAL.
+
+## Using FluxCompress from Databricks / PySpark
+
+> **Supported compute tiers:** Databricks **Classic** compute
+> (Single User / Shared / No Isolation Shared). **Serverless compute
+> is not supported today** — it blocks Maven library installs and
+> `System.load()` for JNI libraries. Serverless users can still run
+> the Python-only path (`pip install fluxcompress` → `fc.compress_polars`)
+> but not the Spark DSv2 `format("flux")` integration. Details +
+> roadmap: [docs/databricks.md](docs/databricks.md#serverless-limitations).
+
+```python
+# Install the Maven library on your cluster:
+#   com.datamariners.fluxcompress:flux-spark-connector_2.12:0.5.4
+# (the JAR ships the right flux_jni cdylib for every major OS + arch,
+#  so no DBFS sidecar is required).
+
+(sdf.write
+    .format("flux")
+    .option("evolve", "true")
+    .option("profile", "archive")
+    .save("/Volumes/catalog/schema/events.fluxtable"))
+
+df = spark.read.format("flux").load("/Volumes/catalog/schema/events.fluxtable")
+```
+
+See [docs/databricks.md](docs/databricks.md) for the full install
+walkthrough including cluster scoping, init scripts, and troubleshooting.
+
+### Completed in v0.5 (cont.)
+
+- **Parquet-competitive Float64 decode** — the decompressed
+  `Vec<u64>` is handed straight to `Buffer::from_vec`, which reuses
+  the allocation without copying.  No per-value `f64::from_bits`
+  loop, no intermediate `Vec<f64>`.  `Float64 balanced` decompress
+  went from 583 MB/s in v0.4 to **1,051 MB/s** in v0.5.  The same
+  zero-copy dispatch accelerates `Int64`, `UInt64`, `Date64`, and
+  every 8-byte `Timestamp(*, None)` variant.
+- **Zero-copy buffer sharing** (same change) — for every
+  same-width 64-bit numeric type, the Arrow `Buffer` inside the
+  output `ArrayData` is the exact allocation the decompressor
+  produced. Widening / narrowing types (`Int32`, `Float32`, etc.)
+  still go through the per-value conversion path because they need
+  width adjustment.
+
+### Planned
+
+- **f128 (IEEE 754 binary128) support** — full pipeline integration for
+  128-bit floats. See [docs/roadmap-f128.md](docs/roadmap-f128.md) for
+  the full plan; current blocker is that Arrow doesn't yet expose a
+  `Float128` data type, so there is no in-Arrow transport for the
+  values. Our on-disk format already has everything needed (u128
+  pipeline + `Decimal128` carrier as a stop-gap); we're waiting on the
+  Arrow community spec.
+- **Zero-copy Float32 / Int32 / UInt32 decode** — extend the
+  `Buffer::from_vec` path to narrower primitives by having the
+  decompressor emit `Vec<u32>` directly instead of widening to u64.
+- **Global cross-file FSST dictionaries** — share symbol tables across
+  `.flux` files in a table so cold-storage optimization phases can
+  reuse training work.
 
 See also:
+- [docs/release-process.md](docs/release-process.md) — how Conventional Commits + release-please drive versions
+- [docs/homebrew.md](docs/homebrew.md) — Homebrew tap + cargo-dist binary distribution
+- [docs/roadmap-spark-connector.md](docs/roadmap-spark-connector.md)
+- [docs/roadmap-mutations.md](docs/roadmap-mutations.md) — DELETE / UPDATE / MERGE via COW
 - [docs/roadmap-performance.md](docs/roadmap-performance.md) — Detailed performance plan
 - [docs/roadmap-wal.md](docs/roadmap-wal.md) — Binary WAL migration
+- [docs/roadmap-f128.md](docs/roadmap-f128.md) — IEEE 754 binary128 integration plan
 
 ---
 

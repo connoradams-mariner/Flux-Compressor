@@ -1,6 +1,7 @@
 [package]
 name        = "fluxcapacitor"
 description = "FluxCompress CLI – two-pass cold storage optimizer and file manager"
+readme      = "README.md"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -16,7 +17,10 @@ name = "fluxcapacitor"
 path = "src/main.rs"
 
 [dependencies]
-loom         = { path = "../loom" }
+# Alias `flux-loom` back to the short `loom` name so the CLI's
+# `use loom::…` imports stay identical. Version pin is at the
+# workspace level.
+loom         = { workspace = true }
 clap         = { workspace = true }
 polars       = { workspace = true }
 arrow        = { workspace = true }

@@ -158,6 +158,14 @@ pub struct ColumnDescriptor {
     pub children: Vec<ColumnDescriptor>,
     /// Leaf column ID mapping to `BlockMeta.column_id`. `u16::MAX` for containers.
     pub column_id: u16,
+    /// Phase E: logical `field_id` from the table's `TableSchema`.
+    ///
+    /// `None` on pre-Phase-E files and on columns the writer didn't
+    /// have a field_id for (e.g. ad-hoc compressions that don't
+    /// originate from a FluxTable schema). Serialised only when set
+    /// so old `.flux` files stay byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_id: Option<u32>,
 }
 
 /// The complete Atlas footer: a list of [`BlockMeta`] entries plus a trailer.
@@ -222,7 +230,9 @@ impl AtlasFooter {
     /// The preceding 4 bytes are `footer_length`.
     pub fn from_file_tail(data: &[u8]) -> FluxResult<Self> {
         if data.len() < 16 {
-            return Err(FluxError::InvalidFile("file too small for flux footer".into()));
+            return Err(FluxError::InvalidFile(
+                "file too small for flux footer".into(),
+            ));
         }
 
         // Validate magic.
@@ -240,7 +250,9 @@ impl AtlasFooter {
             u32::from_le_bytes(data[len_off..len_off + 4].try_into().unwrap()) as usize;
 
         if footer_length > data.len() {
-            return Err(FluxError::InvalidFile("footer_length exceeds file size".into()));
+            return Err(FluxError::InvalidFile(
+                "footer_length exceeds file size".into(),
+            ));
         }
 
         let footer_start = data.len() - footer_length;
@@ -249,21 +261,24 @@ impl AtlasFooter {
         // Read block count (4 bytes before footer_length).
         let count_off = footer_data.len() - 12;
         let block_count =
-            u32::from_le_bytes(footer_data[count_off..count_off + 4].try_into().unwrap())
-                as usize;
+            u32::from_le_bytes(footer_data[count_off..count_off + 4].try_into().unwrap()) as usize;
 
         // Read schema length (4 bytes before block_count).
         let schema_len_off = footer_data.len() - 16;
-        let schema_len =
-            u32::from_le_bytes(footer_data[schema_len_off..schema_len_off + 4].try_into().unwrap())
-                as usize;
+        let schema_len = u32::from_le_bytes(
+            footer_data[schema_len_off..schema_len_off + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
 
         let block_section_len = block_count * BLOCK_META_SIZE;
 
         let mut blocks = Vec::with_capacity(block_count);
         for i in 0..block_count {
             let off = i * BLOCK_META_SIZE;
-            blocks.push(BlockMeta::from_bytes(&footer_data[off..off + BLOCK_META_SIZE])?);
+            blocks.push(BlockMeta::from_bytes(
+                &footer_data[off..off + BLOCK_META_SIZE],
+            )?);
         }
 
         // Parse schema JSON if present.
@@ -271,7 +286,7 @@ impl AtlasFooter {
             let schema_start = block_section_len;
             let schema_end = schema_start + schema_len;
             serde_json::from_slice(&footer_data[schema_start..schema_end])
-                .map_err(|e| FluxError::Internal(format!("schema deserialize: {e}")))?  
+                .map_err(|e| FluxError::Internal(format!("schema deserialize: {e}")))?
         } else {
             Vec::new()
         };
@@ -374,7 +389,7 @@ mod tests {
     #[test]
     fn predicate_pushdown_skips_blocks() {
         let mut footer = AtlasFooter::new();
-        footer.push(make_meta(0, 0, 50));    // min=0, max=50
+        footer.push(make_meta(0, 0, 50)); // min=0, max=50
         footer.push(make_meta(100, 51, 150)); // min=51, max=150
         footer.push(make_meta(200, 151, 300)); // min=151, max=300
 

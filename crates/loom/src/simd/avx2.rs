@@ -19,23 +19,18 @@
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use crate::error::FluxResult;
 use super::scalar::unpack_scalar;
+use crate::error::FluxResult;
 
 /// # Safety
 /// Caller must ensure AVX2 is available (`is_x86_feature_detected!("avx2")`).
 #[target_feature(enable = "avx2")]
-pub unsafe fn unpack_avx2(
-    slab: &[u8],
-    width: u8,
-    count: usize,
-    out: &mut [u64],
-) -> FluxResult<()> {
+pub unsafe fn unpack_avx2(slab: &[u8], width: u8, count: usize, out: &mut [u64]) -> FluxResult<()> {
     match width {
-        8  => unpack_8bit_avx2(slab, count, out),
+        8 => unpack_8bit_avx2(slab, count, out),
         16 => unpack_16bit_avx2(slab, count, out),
         32 => unpack_32bit_avx2(slab, count, out),
-        _  => unpack_scalar(slab, width, count, out), // irregular width fallback
+        _ => unpack_scalar(slab, width, count, out), // irregular width fallback
     }
 }
 
@@ -97,14 +92,18 @@ unsafe fn unpack_16bit_avx2(slab: &[u8], count: usize, out: &mut [u64]) -> FluxR
         let mut tmp = [0u32; 8];
         _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, masked);
         for (j, &v) in tmp.iter().enumerate() {
-            if i + j < count { out[i + j] = v as u64; }
+            if i + j < count {
+                out[i + j] = v as u64;
+            }
         }
         // Upper half.
         let hi = _mm256_extracti128_si256(masked, 1);
         let mut tmp2 = [0u32; 4];
         _mm_storeu_si128(tmp2.as_mut_ptr() as *mut __m128i, hi);
         for (j, &v) in tmp2.iter().enumerate() {
-            if i + 8 + j < count { out[i + 8 + j] = v as u64; }
+            if i + 8 + j < count {
+                out[i + 8 + j] = v as u64;
+            }
         }
 
         i += 16;

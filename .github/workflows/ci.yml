@@ -1,0 +1,120 @@
+# Continuous integration for FluxCompress.
+#
+# Runs on every push and pull-request to `main`:
+#   * Rust: `cargo fmt --check`, `cargo clippy`, `cargo test --lib`.
+#   * Scala: `sbt compile + test` for the Spark DataSource V2 connector
+#     (unit tests; the JNI-dependent e2e tests skip cleanly).
+#   * Python: `maturin develop` + `pytest python/tests/`.
+#
+# Keep this file narrow — release pipelines live in separate workflows
+# so a failing release doesn't block day-to-day PRs.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # Cancel in-flight CI runs for the same ref when a new push lands.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        # `-D warnings` stays out of CI for now; the crate has pre-existing
+        # lints we clean up in a separate pass.
+        run: cargo clippy --workspace --all-targets --no-deps
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      - name: Test
+        run: cargo test --workspace --lib --tests
+
+  scala:
+    name: Scala (Spark connector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: sbt/setup-sbt@v1
+      - name: Cache sbt / Coursier / Ivy
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sbt
+            ~/.ivy2/cache
+            ~/.cache/coursier
+          key: sbt-${{ hashFiles('spark-connector/**/*.sbt', 'spark-connector/project/**/*.sbt', 'spark-connector/project/build.properties') }}
+
+      - name: Compile connector
+        working-directory: spark-connector
+        run: sbt -Dsbt.color=always -batch compile
+
+      - name: Test connector
+        working-directory: spark-connector
+        # The e2e round-trip test auto-skips when `flux_jni` is not on
+        # `java.library.path`; the schema-converter tests always run.
+        run: sbt -Dsbt.color=always -batch test
+
+  python:
+    name: Python (PyO3 bindings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Create virtualenv + install maturin + test deps
+        run: |
+          python -m venv .venv
+          # shellcheck source=/dev/null
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          # `pytest-benchmark` is required by `test_benchmarks.py` + the
+          # `test_benchmark_*` cases in `test_core.py`; without it pytest
+          # records those as collection errors rather than skipping them.
+          pip install maturin pytest pytest-benchmark pyarrow polars
+          # Expose the venv to subsequent steps by exporting its bin
+          # dir onto GITHUB_PATH; `maturin develop` refuses to install
+          # into the system Python, so it needs an active venv.
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+      - name: Build Python extension (develop mode)
+        run: maturin develop --release -m crates/python/Cargo.toml
+      - name: Run Python tests
+        # `--benchmark-disable` keeps the bench-fixture tests as
+        # correctness smoke-tests (single iteration, no statistical
+        # sampling) instead of the default 5-round calibrated sweep.
+        # Without this flag the CI run balloons to 20+ minutes because
+        # `test_benchmarks.py` parametrizes up to 1 M rows across 27
+        # benchmark cases.
+        #
+        # Run the full benchmark sweep locally with:
+        #     pytest python/tests/ --benchmark-only -v
+        run: pytest python/tests/ -v --benchmark-disable

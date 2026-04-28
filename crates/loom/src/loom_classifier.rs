@@ -20,15 +20,15 @@ use crate::bit_io::bits_needed;
 #[repr(u16)]
 pub enum LoomStrategy {
     /// Run-Length Encoding — optimal for constant / near-constant columns.
-    Rle         = 0x0001,
+    Rle = 0x0001,
     /// Delta-Delta Encoding — optimal for sorted or monotone sequences.
-    DeltaDelta  = 0x0002,
+    DeltaDelta = 0x0002,
     /// Dictionary Encoding — optimal for low-cardinality string/enum columns.
-    Dictionary  = 0x0003,
+    Dictionary = 0x0003,
     /// Bit-Slab with optional Outlier Map — optimal for numeric range data.
-    BitSlab     = 0x0004,
+    BitSlab = 0x0004,
     /// SIMD-accelerated LZ4 — fallback for high-entropy data.
-    SimdLz4     = 0x0005,
+    SimdLz4 = 0x0005,
 }
 
 /// Bit flag in the strategy_mask u16 indicating u64-only mode.
@@ -129,8 +129,7 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
     // catastrophic. Guard the RLE path with an endpoint-equality sanity
     // check: for a truly constant column, first == mid == last.
     let endpoints_equal = values.len() < 3
-        || (values[0] == values[values.len() / 2]
-            && values[0] == values[values.len() - 1]);
+        || (values[0] == values[values.len() / 2] && values[0] == values[values.len() - 1]);
 
     if entropy < 1e-9 && endpoints_equal {
         // All values identical → RLE.
@@ -189,7 +188,11 @@ pub fn classify(values: &[u128]) -> ClassificationResult {
     let max_width = *bit_widths.last().unwrap();
 
     let use_outlier_map = max_width > p99_width.saturating_add(32);
-    let slab_width = if use_outlier_map { p99_width } else { max_width };
+    let slab_width = if use_outlier_map {
+        p99_width
+    } else {
+        max_width
+    };
     let slab_width = slab_width.clamp(1, 64);
 
     // If all widths fit comfortably, use BitSlab.
@@ -235,7 +238,11 @@ fn bit_entropy(values: &[u128]) -> f64 {
     // on the top 8 *occupied* bits rather than bits 120-127 (which are
     // always zero for values that fit in a u64).
     let max_val = values.iter().copied().max().unwrap_or(0);
-    let msb = if max_val > 0 { 128 - max_val.leading_zeros() } else { 0 };
+    let msb = if max_val > 0 {
+        128 - max_val.leading_zeros()
+    } else {
+        0
+    };
     let shift = msb.saturating_sub(8);
 
     let mut counts = [0u32; 256];
@@ -257,15 +264,29 @@ fn bit_entropy(values: &[u128]) -> f64 {
 
 /// Returns `true` when first-order differences are constant or have very low
 /// variance (suitable for Delta-Delta encoding).
+///
+/// Operates entirely in checked arithmetic: full-width `u128` values
+/// reinterpreted as `i128` can produce differences or spans that exceed
+/// the signed range (e.g. Decimal128 columns holding values near both
+/// signed extremes). A column whose stride cannot even be represented
+/// as a single `i128` is, by definition, *not* delta-stable, so any
+/// overflow short-circuits to `false` rather than panicking.
 fn is_delta_stable(values: &[u128]) -> bool {
     if values.len() < 4 {
         return false;
     }
-    // Compute deltas as signed i128 differences.
-    let deltas: Vec<i128> = values
-        .windows(2)
-        .map(|w| w[1] as i128 - w[0] as i128)
-        .collect();
+
+    // Compute deltas as signed i128 differences, bailing out the moment
+    // any pair's difference overflows i128. This is the cheap path and
+    // matches the classifier's "no-false-positives" contract: if we
+    // can't confidently model the stride, we decline the strategy.
+    let mut deltas: Vec<i128> = Vec::with_capacity(values.len() - 1);
+    for w in values.windows(2) {
+        match (w[1] as i128).checked_sub(w[0] as i128) {
+            Some(d) => deltas.push(d),
+            None => return false,
+        }
+    }
 
     let first_delta = deltas[0];
 
@@ -274,8 +295,12 @@ fn is_delta_stable(values: &[u128]) -> bool {
         return true;
     }
 
-    // Check for narrow Gaussian: variance of deltas is small relative to range.
-    let mean = deltas.iter().sum::<i128>() as f64 / deltas.len() as f64;
+    // Check for narrow Gaussian: variance of deltas is small relative
+    // to range. We promote to f64 for the statistics so we avoid i128
+    // overflow on sum / range while still being fast.
+    let n = deltas.len() as f64;
+    let sum: f64 = deltas.iter().map(|&d| d as f64).sum();
+    let mean = sum / n;
     let variance = deltas
         .iter()
         .map(|&d| {
@@ -283,13 +308,17 @@ fn is_delta_stable(values: &[u128]) -> bool {
             diff * diff
         })
         .sum::<f64>()
-        / deltas.len() as f64;
+        / n;
 
     let std_dev = variance.sqrt();
-    let range = deltas.iter().max().unwrap() - deltas.iter().min().unwrap();
+    let min = *deltas.iter().min().unwrap();
+    let max = *deltas.iter().max().unwrap();
+    // `max - min` can overflow i128 when deltas span both signed
+    // extremes; fall back to f64 which has enough headroom for the
+    // ratio check below.
+    let range_f64 = (max as f64) - (min as f64);
 
-    // "Narrow Gaussian": standard deviation is less than 1 % of the range.
-    range > 0 && std_dev / (range.abs() as f64) < 0.01
+    range_f64 > 0.0 && std_dev / range_f64.abs() < 0.01
 }
 
 /// Fraction of unique values in the segment.

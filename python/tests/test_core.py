@@ -60,7 +60,11 @@ def test_import():
     assert hasattr(fc, "inspect")
     assert hasattr(fc, "col")
     assert hasattr(fc, "__version__")
-    assert fc.__version__ == "0.1.0"
+    # Just check that the version looks like a SemVer string instead of
+    # hard-coding a literal — the previous 0.1.0 pin locked the test
+    # suite to an ancient release.
+    assert isinstance(fc.__version__, str)
+    assert fc.__version__.count(".") == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,11 +91,10 @@ def test_round_trip_large(large_table):
     import fluxcompress as fc
     buf = fc.compress(large_table)
     out = fc.decompress(buf, column_name="user_id")
-    # FluxCompress currently decompresses all columns' blocks into a single
-    # flat column (multi-column metadata is not yet in the Atlas footer).
-    # Total rows = sum of rows across all columns.
-    num_cols = large_table.num_columns
-    assert out.num_rows == large_table.num_rows * num_cols
+    # Multi-column Atlas footers shipped in v0.2 — decompress now
+    # preserves per-column row counts. The pre-v0.2 behaviour of
+    # concatenating every column into a single flat column is gone.
+    assert out.num_rows == large_table.num_rows
 
 
 def test_round_trip_constant():
@@ -291,9 +294,11 @@ def test_polars_large_dataframe():
         "val": [i * 37 % 99_999 for i in range(100_000)],
     })
     buf = fc.compress_polars(df)
-    # Multi-column: all columns' blocks are concatenated on decompression.
     df2 = fc.decompress_polars(buf, column_name="id")
-    assert len(df2) == 100_000 * df.width
+    # Per-column metadata in the Atlas footer (v0.2+) preserves the
+    # original row count on decompression instead of concatenating
+    # every column into one flat stream.
+    assert len(df2) == 100_000
 
 
 def test_polars_predicate_pushdown():

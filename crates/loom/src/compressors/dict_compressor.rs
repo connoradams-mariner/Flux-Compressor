@@ -13,13 +13,13 @@
 //! [packed index bitstream]
 //! ```
 
+use crate::{
+    bit_io::{BitReader, BitWriter, bits_needed},
+    error::{FluxError, FluxResult},
+};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
-use crate::{
-    bit_io::{BitWriter, BitReader, bits_needed},
-    error::{FluxError, FluxResult},
-};
 
 pub const TAG: u8 = 0x03;
 
@@ -83,9 +83,11 @@ pub fn decompress(data: &[u8]) -> FluxResult<(Vec<u128>, usize)> {
     let mut values = Vec::with_capacity(value_count);
     for _ in 0..value_count {
         let idx = reader.read_value().unwrap_or(0) as usize;
-        values.push(*dict.get(idx).ok_or_else(|| {
-            FluxError::InvalidFile(format!("dict index {idx} out of range"))
-        })?);
+        values.push(
+            *dict
+                .get(idx)
+                .ok_or_else(|| FluxError::InvalidFile(format!("dict index {idx} out of range")))?,
+        );
     }
 
     Ok((values, header_end + slab_len))

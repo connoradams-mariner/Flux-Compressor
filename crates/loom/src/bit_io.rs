@@ -180,7 +180,11 @@ impl<'a> BitReader<'a> {
     /// Create a reader over `data` that extracts `width`-bit values.
     pub fn new(data: &'a [u8], width: u8) -> Self {
         assert!(width >= 1 && width <= 64);
-        let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
         Self {
             data,
             width,
@@ -202,8 +206,8 @@ impl<'a> BitReader<'a> {
         }
 
         let byte_idx = self.bit_pos / 8;
-        let bit_off  = (self.bit_pos % 8) as u32;
-        let width    = self.width as u32;
+        let bit_off = (self.bit_pos % 8) as u32;
+        let width = self.width as u32;
 
         let value = if width + bit_off <= 64 {
             // ── u64 fast path ─────────────────────────────────────────────
@@ -322,7 +326,9 @@ mod tests {
     fn round_trip_4bit() {
         let values = [0u64, 1, 7, 14, 15];
         let mut w = BitWriter::new(4);
-        for &v in &values { w.write_value(v).unwrap(); }
+        for &v in &values {
+            w.write_value(v).unwrap();
+        }
         let buf = w.finish();
 
         let mut r = BitReader::new(&buf, 4);
@@ -335,7 +341,9 @@ mod tests {
     fn round_trip_10bit() {
         let values: Vec<u64> = (0..1024).step_by(7).collect();
         let mut w = BitWriter::new(10);
-        for &v in &values { w.write_value(v).unwrap(); }
+        for &v in &values {
+            w.write_value(v).unwrap();
+        }
         let buf = w.finish();
 
         let mut r = BitReader::new(&buf, 10);

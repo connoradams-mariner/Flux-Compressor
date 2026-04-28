@@ -1,6 +1,7 @@
 [package]
 name        = "fluxcompress-python"
 description = "Python bindings for FluxCompress via PyO3"
+readme      = "README.md"
 version.workspace    = true
 edition.workspace    = true
 license.workspace    = true
@@ -14,7 +15,9 @@ name       = "fluxcompress"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-loom         = { path = "../loom" }
+# Alias `flux-loom` back to `loom` for the PyO3 extension. Version
+# pin is at the workspace level.
+loom         = { workspace = true }
 pyo3         = { version = "0.21", features = ["extension-module", "abi3-py38"] }
 arrow        = { workspace = true, features = ["pyarrow"] }
 arrow-array  = { workspace = true }

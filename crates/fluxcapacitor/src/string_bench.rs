@@ -26,16 +26,19 @@ use loom::{
 
 pub fn cmd_string_bench(rows: usize) -> Result<()> {
     println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║  String Compression Bench ({} rows)                       ", fmt_rows(rows));
+    println!(
+        "║  String Compression Bench ({} rows)                       ",
+        fmt_rows(rows)
+    );
     println!("╚══════════════════════════════════════════════════════════════════╝");
 
     let patterns: &[(&str, fn(usize) -> Vec<String>)] = &[
-        ("urls_high_card",    gen_urls_high_card),
-        ("uuids",             gen_uuids),
-        ("log_lines",         gen_log_lines),
-        ("sorted_paths",      gen_sorted_paths),
+        ("urls_high_card", gen_urls_high_card),
+        ("uuids", gen_uuids),
+        ("log_lines", gen_log_lines),
+        ("sorted_paths", gen_sorted_paths),
         ("mixed_categorical", gen_mixed_categorical),
-        ("short_skus",        gen_short_skus),
+        ("short_skus", gen_short_skus),
     ];
 
     for (name, make) in patterns {
@@ -43,18 +46,20 @@ pub fn cmd_string_bench(rows: usize) -> Result<()> {
         let strings = make(rows);
         let raw_bytes: usize = strings.iter().map(|s| s.len()).sum();
         let batch = build_batch(&strings);
-        println!("  raw data: {}  (avg {:.1} B/row)",
+        println!(
+            "  raw data: {}  (avg {:.1} B/row)",
             human(raw_bytes),
-            raw_bytes as f64 / rows as f64);
+            raw_bytes as f64 / rows as f64
+        );
         println!(
             "  {:<18} {:>10} {:>8} {:>12} {:>12}",
             "Profile", "Size", "Ratio", "Comp MB/s", "Dec MB/s"
         );
         println!("  {}", "─".repeat(66));
         for (pname, profile) in [
-            ("Speed",    CompressionProfile::Speed),
+            ("Speed", CompressionProfile::Speed),
             ("Balanced", CompressionProfile::Balanced),
-            ("Archive",  CompressionProfile::Archive),
+            ("Archive", CompressionProfile::Archive),
         ] {
             run_one(&batch, raw_bytes, pname, profile)?;
         }
@@ -96,7 +101,11 @@ fn run_one(
 
 fn build_batch(values: &[String]) -> RecordBatch {
     let arr = StringArray::from_iter(values.iter().map(|s| Some(s.as_str())));
-    let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, false)]));
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Utf8,
+        false,
+    )]));
     RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap()
 }
 
@@ -104,10 +113,20 @@ fn build_batch(values: &[String]) -> RecordBatch {
 
 fn gen_urls_high_card(rows: usize) -> Vec<String> {
     let hosts = [
-        "api.example.com", "www.shop.io", "cdn.media.net", "static.assets.com",
-        "app.enterprise.co", "data.warehouse.internal",
+        "api.example.com",
+        "www.shop.io",
+        "cdn.media.net",
+        "static.assets.com",
+        "app.enterprise.co",
+        "data.warehouse.internal",
     ];
-    let paths = ["/v1/users", "/v2/orders", "/api/search", "/static/img", "/healthz"];
+    let paths = [
+        "/v1/users",
+        "/v2/orders",
+        "/api/search",
+        "/static/img",
+        "/healthz",
+    ];
     let mut s: u64 = 0xDEAD_BEEF_CAFE_BABE;
     (0..rows)
         .map(|i| {
@@ -116,7 +135,12 @@ fn gen_urls_high_card(rows: usize) -> Vec<String> {
             s ^= s << 17;
             let h = hosts[(s as usize) % hosts.len()];
             let p = paths[(s as usize / 7) % paths.len()];
-            format!("https://{h}{p}?id={}&session={:016x}&ts={}", i, s, 1700000000u64 + (i as u64))
+            format!(
+                "https://{h}{p}?id={}&session={:016x}&ts={}",
+                i,
+                s,
+                1700000000u64 + (i as u64)
+            )
         })
         .collect()
 }
@@ -162,7 +186,7 @@ fn gen_log_lines(rows: usize) -> Vec<String> {
             s ^= s >> 7;
             s ^= s << 17;
             let lvl = levels[(s as usize) % levels.len()];
-            let md  = modules[(s as usize / 3) % modules.len()];
+            let md = modules[(s as usize / 3) % modules.len()];
             let tpl = templates[(s as usize / 11) % templates.len()];
             format!(
                 "2024-03-{:02}T{:02}:{:02}:{:02}Z {} {}: {} [trace={:016x}]",
@@ -170,7 +194,10 @@ fn gen_log_lines(rows: usize) -> Vec<String> {
                 (i as u64 / 3600) % 24,
                 (i as u64 / 60) % 60,
                 (i as u64) % 60,
-                lvl, md, tpl, s,
+                lvl,
+                md,
+                tpl,
+                s,
             )
         })
         .collect()
@@ -193,7 +220,9 @@ fn gen_sorted_paths(rows: usize) -> Vec<String> {
 fn gen_mixed_categorical(rows: usize) -> Vec<String> {
     // 200 distinct values, so ~0.002% cardinality — should hit dict path
     // but still exercise the high-card fallback on other patterns.
-    let cats: Vec<String> = (0..200).map(|i| format!("category_code_{:04}", i)).collect();
+    let cats: Vec<String> = (0..200)
+        .map(|i| format!("category_code_{:04}", i))
+        .collect();
     let mut s: u64 = 0x0102_0304_0506_0708;
     (0..rows)
         .map(|_| {
@@ -215,19 +244,30 @@ fn gen_short_skus(rows: usize) -> Vec<String> {
 fn human(n: usize) -> String {
     const K: f64 = 1024.0;
     let f = n as f64;
-    if f < K              { format!("{} B", n) }
-    else if f < K * K     { format!("{:.1} KB", f / K) }
-    else if f < K * K * K { format!("{:.1} MB", f / (K * K)) }
-    else                  { format!("{:.1} GB", f / (K * K * K)) }
+    if f < K {
+        format!("{} B", n)
+    } else if f < K * K {
+        format!("{:.1} KB", f / K)
+    } else if f < K * K * K {
+        format!("{:.1} MB", f / (K * K))
+    } else {
+        format!("{:.1} GB", f / (K * K * K))
+    }
 }
 
 fn fmt_rows(n: usize) -> String {
-    if n >= 1_000_000 { format!("{}M", n / 1_000_000) }
-    else if n >= 1_000 { format!("{}K", n / 1_000) }
-    else { n.to_string() }
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn mbs(bytes: usize, ms: f64) -> f64 {
-    if ms <= 0.0 { return 0.0; }
+    if ms <= 0.0 {
+        return 0.0;
+    }
     (bytes as f64) / (1024.0 * 1024.0) / (ms / 1000.0)
 }

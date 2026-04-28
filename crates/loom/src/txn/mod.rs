@@ -19,15 +19,25 @@
 //! ```
 
 mod log_entry;
+pub mod mutation;
+pub mod optimizer;
+pub mod partition;
+pub mod projection;
+pub mod schema;
 mod snapshot;
 mod table;
-pub mod partition;
-pub mod optimizer;
+pub mod wal;
 
-pub use log_entry::{LogEntry, Operation};
-pub use snapshot::Snapshot;
-pub use table::FluxTable;
-pub use partition::{
-    PartitionTransform, PartitionField, PartitionSpec,
-    ColumnStats, FileManifest, TableMeta,
+pub use log_entry::{Action, LogEntry, Operation};
+pub use mutation::{
+    DeleteStats, MatchedAction, MergeClauses, MergeStats, MutationAction, NotMatchedAction,
+    ScalarValue, UpdateStats,
 };
+pub use partition::{
+    ColumnStats, FileManifest, PartitionField, PartitionSpec, PartitionTransform, TableMeta,
+};
+pub use projection::{ColumnPlan, FilePlan, build_file_plan};
+pub use schema::{DefaultValue, PromotedFrom, SchemaChain, SchemaField, TableSchema};
+pub use snapshot::Snapshot;
+pub use table::{EvolveOptions, FluxScan, FluxTable};
+pub use wal::{LogFormat, WalEntry, WalLog};

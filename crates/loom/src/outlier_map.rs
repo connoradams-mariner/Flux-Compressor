@@ -30,9 +30,9 @@
 //! Each entry is a raw little-endian u128 (16 bytes), preserving full
 //! precision for aggregation results that overflow 64 bits.
 
+use crate::error::{FluxError, FluxResult};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Write};
-use crate::error::{FluxError, FluxResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OutlierMap
@@ -143,7 +143,11 @@ impl<'a> OutlierMapReader<'a> {
             ));
         }
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        Ok(Self { data, count, patch_idx: 0 })
+        Ok(Self {
+            data,
+            count,
+            patch_idx: 0,
+        })
     }
 
     /// Fetch the next outlier value.  Returns `None` when all patches are
@@ -158,8 +162,7 @@ impl<'a> OutlierMapReader<'a> {
             return None;
         }
         let lo = u64::from_le_bytes(self.data[offset..offset + 8].try_into().unwrap()) as u128;
-        let hi =
-            u64::from_le_bytes(self.data[offset + 8..offset + 16].try_into().unwrap()) as u128;
+        let hi = u64::from_le_bytes(self.data[offset + 8..offset + 16].try_into().unwrap()) as u128;
         self.patch_idx += 1;
         Some(lo | (hi << 64))
     }
@@ -188,9 +191,7 @@ impl<'a> OutlierMapReader<'a> {
 /// The slab stores `(value - FoR)` in `slab_width` bits.  Outliers are
 /// replaced with the all-ones sentinel in the slab and their original value is
 /// appended to the [`OutlierMap`].
-pub fn encode_with_outlier_map(
-    values: &[u128],
-) -> FluxResult<(Vec<u8>, OutlierMap, u8, u128)> {
+pub fn encode_with_outlier_map(values: &[u128]) -> FluxResult<(Vec<u8>, OutlierMap, u8, u128)> {
     use crate::bit_io::{BitWriter, discover_width};
 
     let (slab_width, for_val) = discover_width(values);
@@ -267,8 +268,7 @@ mod tests {
         let values: Vec<u128> = (100u128..200).collect();
         let (slab, om, w, for_val) = encode_with_outlier_map(&values).unwrap();
         let bytes = om.to_bytes().unwrap();
-        let decoded =
-            decode_with_outlier_map(&slab, &bytes, for_val, w, values.len()).unwrap();
+        let decoded = decode_with_outlier_map(&slab, &bytes, for_val, w, values.len()).unwrap();
         assert_eq!(decoded, values);
     }
 
@@ -283,8 +283,7 @@ mod tests {
         assert!(!om.is_empty(), "giant value should be in outlier map");
 
         let om_bytes = om.to_bytes().unwrap();
-        let decoded =
-            decode_with_outlier_map(&slab, &om_bytes, for_val, w, values.len()).unwrap();
+        let decoded = decode_with_outlier_map(&slab, &om_bytes, for_val, w, values.len()).unwrap();
 
         assert_eq!(decoded, values);
     }

@@ -13,8 +13,8 @@
 //! For general numeric types (`Float64`, `Int64`, etc.), the router returns
 //! [`RouteDecision::Classify`] to use the standard Loom waterfall.
 
-use arrow_schema::{DataType, TimeUnit};
 use crate::loom_classifier::LoomStrategy;
+use arrow_schema::{DataType, TimeUnit};
 
 /// The native width of values for a fast-path column.
 ///
@@ -115,16 +115,14 @@ pub fn route(dt: &DataType) -> RouteDecision {
         DataType::Decimal128(_, _) => RouteDecision::Classify,
 
         // ── String / Binary pipeline (Tier 2) ────────────────────────────
-        DataType::Utf8
-        | DataType::LargeUtf8
-        | DataType::Binary
-        | DataType::LargeBinary => RouteDecision::StringPipeline,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary => {
+            RouteDecision::StringPipeline
+        }
 
         // ── Nested containers (Tier 3) ───────────────────────────────────
-        DataType::Struct(_)
-        | DataType::List(_)
-        | DataType::LargeList(_)
-        | DataType::Map(_, _) => RouteDecision::NestedPipeline,
+        DataType::Struct(_) | DataType::List(_) | DataType::LargeList(_) | DataType::Map(_, _) => {
+            RouteDecision::NestedPipeline
+        }
 
         // ── Unsupported ──────────────────────────────────────────────────
         // Fall back to Classify for anything else; extract_column_data()
